@@ -1,0 +1,15 @@
+packages:
+  "framer-motion": "For page transitions and premium card micro-interactions"
+  "clsx": "Utility for constructing className strings conditionally"
+  "tailwind-merge": "Utility for merging Tailwind classes safely"
+  "date-fns": "For formatting game times and dates"
+  "recharts": "For player stat visualizations"
+
+images:
+  - path: "artifacts/propedge/public/images/dark-ice-bg.png"
+    description: "Abstract very dark navy blue and neon cyan dark mode background, subtle icy texture, sharp geometric lines, sports analytics tech vibe"
+    aspect_ratio: "16:9"
+
+notes:
+  - Defaulting to Dark Mode only as per design requirements
+  - Using generated API hooks from @workspace/api-client-react
