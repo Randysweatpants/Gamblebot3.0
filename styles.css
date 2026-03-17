@@ -1,1 +1,24 @@
-<script src="/Gamblebot3.0/app.js"></script>
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #0f172a;
+  color: #e5e7eb;
+}
+
+.wrap {
+  max-width: 800px;
+  margin: 60px auto;
+  padding: 24px;
+}
+
+h1 {
+  margin-bottom: 8px;
+}
+
+.card {
+  margin-top: 24px;
+  padding: 20px;
+  border-radius: 12px;
+  background: #111827;
+  border: 1px solid #334155;
+}
