@@ -120,44 +120,39 @@ app.get("/api/top-ev-picks", async (req, res) => {
         }
 
         const oddsData = await oddsResponse.json();
-        if (!Array.isArray(oddsData)) return;
+        const bookmakers = Array.isArray(oddsData.bookmakers) ? oddsData.bookmakers : [];
 
-        for (const event of oddsData) {
-          const bookmakers = Array.isArray(event.bookmakers) ? event.bookmakers : [];
-          for (const bookmaker of bookmakers) {
-            if (book && bookmaker.key !== book) continue;
-            const bookName = bookmaker.title || bookmaker.key || "";
-            const marketsList = Array.isArray(bookmaker.markets) ? bookmaker.markets : [];
+        for (const bookmaker of bookmakers) {
+          if (book && bookmaker.key !== book) continue;
+          const bookName = bookmaker.title || bookmaker.key || "";
+          const marketsList = Array.isArray(bookmaker.markets) ? bookmaker.markets : [];
 
-            for (const m of marketsList) {
-              if (!markets.includes(m.key)) continue;
-              const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
+          for (const m of marketsList) {
+            if (!markets.includes(m.key)) continue;
+            const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
 
-              for (const outcome of outcomes) {
-                const oddsValue = outcome.price ?? 0;
-                const impliedProb = americanToImpliedProbability(oddsValue) ?? 0;
+            for (const outcome of outcomes) {
+              const oddsValue = outcome.price ?? 0;
+              const impliedProb = americanToImpliedProbability(oddsValue) ?? 0;
 
-                const pick = normalizePick({
-                  player: outcome.description || "",
-                  team: "",
-                  opp: "",
-                  market: marketMap[m.key] || m.key,
-                  line: outcome.point ?? 0,
-                  side: outcome.name || "",
-                  book: bookName,
-                  odds: oddsValue,
-                  proj: 0,
-                  fairProb: impliedProb,
-                  impliedProb,
-                  ev: 0,
-                  confidence: 0,
-                  notes: "live prop odds - projection pending",
-                });
+              const pick = normalizePick({
+                player: outcome.description || "",
+                team: "",
+                opp: "",
+                market: marketMap[m.key] || m.key,
+                line: outcome.point ?? 0,
+                side: outcome.name || "",
+                book: bookName,
+                odds: oddsValue,
+                proj: 0,
+                fairProb: impliedProb,
+                impliedProb,
+                ev: 0,
+                confidence: 0,
+                notes: "live prop odds - projection pending",
+              });
 
-                if (impliedProb >= minEv) {
-                  picks.push(pick);
-                }
-              }
+              picks.push(pick);
             }
           }
         }
