@@ -163,6 +163,50 @@ app.get("/api/top-ev-picks", async (req, res) => {
       })
     );
 
+    // --- Shots on Goal: true EV logic ---
+    const shotsRaw = picks.filter((p) => p.market === "Shots on Goal");
+    // Group by player+line+book
+    const shotsGroups = {};
+    for (const pick of shotsRaw) {
+      const key = `${pick.player}|${pick.line}|${pick.book}`;
+      if (!shotsGroups[key]) shotsGroups[key] = {};
+      shotsGroups[key][pick.side] = pick;
+    }
+
+    const topShots = [];
+    for (const key in shotsGroups) {
+      const group = shotsGroups[key];
+      const over = group["Over"];
+      const under = group["Under"];
+      if (!over || !under) continue; // Need both sides
+
+      // Implied probabilities
+      const pOver = over.impliedProb;
+      const pUnder = under.impliedProb;
+      const sum = pOver + pUnder;
+      if (sum === 0) continue;
+      // No-vig probabilities
+      const fairOver = pOver / sum;
+      const fairUnder = pUnder / sum;
+
+      // EV calculation: EV = (fairProb * payout) - (1 - fairProb)
+      // payout = odds/100 if +odds, 100/abs(odds) if -odds
+      function payout(odds) {
+        if (odds > 0) return odds / 100;
+        return 100 / Math.abs(odds);
+      }
+      over.fairProb = fairOver;
+      under.fairProb = fairUnder;
+      over.ev = (fairOver * payout(over.odds)) - (1 - fairOver);
+      under.ev = (fairUnder * payout(under.odds)) - (1 - fairUnder);
+      over.notes = "no-vig EV estimate";
+      under.notes = "no-vig EV estimate";
+      topShots.push(over, under);
+    }
+    // Sort by EV descending, take top 10
+    const sortedTopShots = topShots.sort((a, b) => b.ev - a.ev).slice(0, 10);
+
+    // Placeholder logic for Points/Assists
     const topPoints = picks
       .filter((p) => p.market === "Points")
       .sort((a, b) => b.impliedProb - a.impliedProb)
@@ -173,15 +217,10 @@ app.get("/api/top-ev-picks", async (req, res) => {
       .sort((a, b) => b.impliedProb - a.impliedProb)
       .slice(0, 10);
 
-    const topShots = picks
-      .filter((p) => p.market === "Shots on Goal")
-      .sort((a, b) => b.impliedProb - a.impliedProb)
-      .slice(0, 10);
-
     return res.json({
       topPoints,
       topAssists,
-      topShots,
+      topShots: sortedTopShots,
       allPicksCount: picks.length,
     });
   } catch (error) {
