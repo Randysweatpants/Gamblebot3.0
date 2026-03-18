@@ -173,28 +173,19 @@
 
       <div class="status" id="statusText">Ready to load live data.</div>
 
-      <div class="card table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Player</th>
-              <th>Team</th>
-              <th>Opp</th>
-              <th>Market</th>
-              <th>Line</th>
-              <th>Side</th>
-              <th>Book</th>
-              <th>Odds</th>
-              <th>Proj</th>
-              <th>Fair %</th>
-              <th>Implied %</th>
-              <th>EV %</th>
-              <th>Confidence</th>
-              <th>Notes</th>
-            </tr>
-          </thead>
-          <tbody id="propsTable"></tbody>
-        </table>
+      <div id="allPicksCount" class="status"></div>
+
+      <div id="topPointsSection">
+        <h2>Top 10 Points</h2>
+        <div id="topPointsCards"></div>
+      </div>
+      <div id="topAssistsSection">
+        <h2>Top 10 Assists</h2>
+        <div id="topAssistsCards"></div>
+      </div>
+      <div id="topShotsSection">
+        <h2>Top 10 Shots on Goal</h2>
+        <div id="topShotsCards"></div>
       </div>
     </div>
 
@@ -210,7 +201,10 @@
         loadBtn: document.getElementById("loadBtn"),
         resetBtn: document.getElementById("resetBtn"),
         statusText: document.getElementById("statusText"),
-        propsTable: document.getElementById("propsTable")
+        allPicksCount: document.getElementById("allPicksCount"),
+        topPointsCards: document.getElementById("topPointsCards"),
+        topAssistsCards: document.getElementById("topAssistsCards"),
+        topShotsCards: document.getElementById("topShotsCards")
       };
 
       function evTextClass(ev) {
@@ -219,50 +213,31 @@
         return "red";
       }
 
-      function renderTable(rows) {
-        if (!rows.length) {
-          els.propsTable.innerHTML = `
-            <tr>
-              <td colspan="14">No live props matched your filters.</td>
-            </tr>
-          `;
+
+      function renderCards(arr, container) {
+        if (!arr || !arr.length) {
+          container.innerHTML = `<div class="status">No picks found.</div>`;
           return;
         }
-
-        els.propsTable.innerHTML = rows.map(p => `
-          <tr>
-            <td>${p.player ?? ""}</td>
-            <td>${p.team ?? ""}</td>
-            <td>${p.opp ?? ""}</td>
-            <td>${p.market ?? ""}</td>
-            <td>${p.line ?? ""}</td>
-            <td>${p.side ?? ""}</td>
-            <td>${p.book ?? ""}</td>
-            <td>${p.odds ?? ""}</td>
-            <td>${p.proj ?? ""}</td>
-            <td>${p.fairProb ?? ""}</td>
-            <td>${p.impliedProb ?? ""}</td>
-            <td class="${evTextClass(Number(p.ev || 0))}">${p.ev ?? ""}</td>
-            <td>${p.confidence ?? ""}</td>
-            <td>${p.notes ?? ""}</td>
-          </tr>
+        container.innerHTML = arr.map(p => `
+          <div class="card">
+            <div><b>Player:</b> ${p.player ?? ""}</div>
+            <div><b>Market:</b> ${p.market ?? ""}</div>
+            <div><b>Side:</b> ${p.side ?? ""}</div>
+            <div><b>Line:</b> ${p.line ?? ""}</div>
+            <div><b>Book:</b> ${p.book ?? ""}</div>
+            <div><b>Odds:</b> ${p.odds ?? ""}</div>
+            <div><b>Implied %:</b> ${p.impliedProb ?? ""}</div>
+            <div><b>Notes:</b> ${p.notes ?? ""}</div>
+          </div>
         `).join("");
       }
 
-      async function loadLiveProps() {
-        const sport = els.sport.value;
-        const market = els.market.value;
-        const book = els.book.value;
-        const team = els.team.value.trim();
-        const minEv = els.minEv.value;
 
-        const params = new URLSearchParams({
-          sport,
-          market,
-          book,
-          team,
-          minEv
-        });
+      async function loadLiveProps() {
+        const book = els.book.value !== "all" ? els.book.value : undefined;
+        const params = new URLSearchParams();
+        if (book) params.set("book", book);
 
         const url = `${BACKEND_URL}/api/top-ev-picks?${params.toString()}`;
 
@@ -275,15 +250,14 @@
           }
 
           const data = await res.json();
-          const rows = Array.isArray(data) ? data : (data.picks || []);
-          renderTable(rows);
-          els.statusText.innerHTML = `<span class="ok">Loaded ${rows.length} live props.</span>`;
+          els.allPicksCount.textContent = `Total live props: ${data.allPicksCount ?? 0}`;
+          renderCards(data.topPoints, els.topPointsCards);
+          renderCards(data.topAssists, els.topAssistsCards);
+          renderCards(data.topShots, els.topShotsCards);
+          els.statusText.innerHTML = `<span class="ok">Loaded live props.</span>`;
         } catch (err) {
-          els.propsTable.innerHTML = `
-            <tr>
-              <td colspan="14">Failed to load live backend data.</td>
-            </tr>
-          `;
+          els.allPicksCount.textContent = "";
+          els.topPointsCards.innerHTML = els.topAssistsCards.innerHTML = els.topShotsCards.innerHTML = "<div class='status'>Failed to load live backend data.</div>";
           els.statusText.innerHTML = `<span class="error">Error loading live data. Check backend URL, CORS, and endpoint response.</span>`;
         }
       }
@@ -296,7 +270,8 @@
         els.book.value = "all";
         els.team.value = "";
         els.minEv.value = 2;
-        els.propsTable.innerHTML = "";
+        els.allPicksCount.textContent = "";
+        els.topPointsCards.innerHTML = els.topAssistsCards.innerHTML = els.topShotsCards.innerHTML = "";
         els.statusText.textContent = "Ready to load live data.";
       });
     </script>
