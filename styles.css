@@ -1,24 +1,18 @@
-body {
-  margin: 0;
-  font-family: Arial, sans-serif;
-  background: #0f172a;
-  color: #e5e7eb;
+button {
+  background: #22c55e;
+  color: #081018;
+  border: none;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+  margin-bottom: 16px;
 }
 
-.wrap {
-  max-width: 800px;
-  margin: 60px auto;
-  padding: 24px;
-}
-
-h1 {
-  margin-bottom: 8px;
-}
-
-.card {
-  margin-top: 24px;
-  padding: 20px;
-  border-radius: 12px;
-  background: #111827;
+pre {
+  white-space: pre-wrap;
+  background: #0b1220;
+  padding: 16px;
+  border-radius: 10px;
   border: 1px solid #334155;
 }
