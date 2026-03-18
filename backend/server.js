@@ -92,35 +92,79 @@ app.get("/api/top-ev-picks", async (req, res) => {
       ? listData.map((event) => event.id ?? event.event_id).filter(Boolean)
       : [];
 
-    if (eventIds.length === 0) {
-      return res.json({ picks: [] });
-    }
-
-    const firstEventId = eventIds[0];
     const markets = ["player_points", "player_assists", "player_shots_on_goal"];
+    const marketMap = {
+      player_points: "Points",
+      player_assists: "Assists",
+      player_shots_on_goal: "Shots on Goal"
+    };
+    const picks = [];
 
-    const oddsUrl = new URL(
-      `https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sport)}/events/${encodeURIComponent(
-        firstEventId
-      )}/odds`
+    await Promise.all(
+      eventIds.map(async (eventId) => {
+        const oddsUrl = new URL(
+          `https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sport)}/events/${encodeURIComponent(
+            eventId
+          )}/odds`
+        );
+        oddsUrl.searchParams.set("apiKey", apiKey);
+        oddsUrl.searchParams.set("regions", "us");
+        oddsUrl.searchParams.set("markets", markets.join(","));
+        oddsUrl.searchParams.set("oddsFormat", "american");
+        oddsUrl.searchParams.set("dateFormat", "iso");
+        if (book) oddsUrl.searchParams.set("bookmakers", book);
+
+        const oddsResponse = await fetch(oddsUrl.toString());
+        if (!oddsResponse.ok) {
+          return; // ignore failures for individual events
+        }
+
+        const oddsData = await oddsResponse.json();
+        if (!Array.isArray(oddsData)) return;
+
+        for (const event of oddsData) {
+          const bookmakers = Array.isArray(event.bookmakers) ? event.bookmakers : [];
+          for (const bookmaker of bookmakers) {
+            if (book && bookmaker.key !== book) continue;
+            const bookName = bookmaker.title || bookmaker.key || "";
+            const marketsList = Array.isArray(bookmaker.markets) ? bookmaker.markets : [];
+
+            for (const m of marketsList) {
+              if (!markets.includes(m.key)) continue;
+              const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
+
+              for (const outcome of outcomes) {
+                const oddsValue = outcome.price ?? 0;
+                const impliedProb = americanToImpliedProbability(oddsValue) ?? 0;
+
+                const pick = normalizePick({
+                  player: outcome.description || "",
+                  team: "",
+                  opp: "",
+                  market: marketMap[m.key] || m.key,
+                  line: outcome.point ?? 0,
+                  side: outcome.name || "",
+                  book: bookName,
+                  odds: oddsValue,
+                  proj: 0,
+                  fairProb: impliedProb,
+                  impliedProb,
+                  ev: 0,
+                  confidence: 0,
+                  notes: "live prop odds - projection pending",
+                });
+
+                if (impliedProb >= minEv) {
+                  picks.push(pick);
+                }
+              }
+            }
+          }
+        }
+      })
     );
-    oddsUrl.searchParams.set("apiKey", apiKey);
-    oddsUrl.searchParams.set("regions", "us");
-    oddsUrl.searchParams.set("markets", markets.join(","));
-    oddsUrl.searchParams.set("oddsFormat", "american");
-    oddsUrl.searchParams.set("dateFormat", "iso");
-    if (book) oddsUrl.searchParams.set("bookmakers", book);
 
-    const oddsResponse = await fetch(oddsUrl.toString());
-    if (!oddsResponse.ok) {
-      const text = await oddsResponse.text();
-      return res.status(oddsResponse.status).json({ error: "failed fetching odds", details: text });
-    }
-
-    const oddsData = await oddsResponse.json();
-    console.log("Raw event-odds response for first NHL event:", oddsData);
-
-    return res.json({ eventId: firstEventId, raw: oddsData });
+    return res.json({ picks });
   } catch (error) {
     return res.status(500).json({ error: "request failed", details: String(error) });
   }
