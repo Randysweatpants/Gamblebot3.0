@@ -69,7 +69,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
   }
 
   const sport = req.query.sport === "NHL" ? "icehockey_nhl" : String(req.query.sport || "icehockey_nhl");
-  const market = String(req.query.market || "playerprops");
+  const market = String(req.query.market || "player_points");
   const book = req.query.book ? String(req.query.book) : undefined;
   const team = req.query.team ? String(req.query.team) : undefined;
   const minEv = req.query.minEv ? Number(req.query.minEv) : -Infinity;
