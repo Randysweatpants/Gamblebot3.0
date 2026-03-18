@@ -174,106 +174,106 @@
       <div class="status" id="statusText">Ready to load live data.</div>
 
       <div id="allPicksCount" class="status"></div>
+<div id="allPicksCount">0</div>
 
-      <div id="topPointsSection">
-        <h2>Top 10 Points</h2>
-        <div id="topPointsCards"></div>
-      </div>
-      <div id="topAssistsSection">
-        <h2>Top 10 Assists</h2>
-        <div id="topAssistsCards"></div>
-      </div>
-      <div id="topShotsSection">
-        <h2>Top 10 Shots on Goal</h2>
-        <div id="topShotsCards"></div>
-      </div>
+<div id="topPointsSection"></div>
+<div id="topAssistsSection"></div>
+<div id="topShotsSection"></div>
     </div>
 
     <script>
-      const BACKEND_URL = "https://gamblebot3-0.onrender.com";
+  const BACKEND_URL = "https://gamblebot3-00.onrender.com";
 
-      const els = {
-        sport: document.getElementById("sport"),
-        market: document.getElementById("market"),
-        book: document.getElementById("book"),
-        team: document.getElementById("team"),
-        minEv: document.getElementById("minEv"),
-        loadBtn: document.getElementById("loadBtn"),
-        resetBtn: document.getElementById("resetBtn"),
-        statusText: document.getElementById("statusText"),
-        allPicksCount: document.getElementById("allPicksCount"),
-        topPointsCards: document.getElementById("topPointsCards"),
-        topAssistsCards: document.getElementById("topAssistsCards"),
-        topShotsCards: document.getElementById("topShotsCards")
-      };
+  const els = {
+    loadBtn: document.getElementById("loadBtn"),
+    resetBtn: document.getElementById("resetBtn"),
+    statusText: document.getElementById("statusText"),
+    pointsSection: document.getElementById("topPointsSection"),
+    assistsSection: document.getElementById("topAssistsSection"),
+    shotsSection: document.getElementById("topShotsSection"),
+    allPicksCount: document.getElementById("allPicksCount")
+  };
 
-      function evTextClass(ev) {
-        if (ev >= 4) return "green";
-        if (ev >= 2) return "yellow";
-        return "red";
+  function renderCard(pick) {
+    return `
+      <div class="pick-card">
+        <div><strong>${pick.player || ""}</strong></div>
+        <div>Market: ${pick.market || ""}</div>
+        <div>Side: ${pick.side || ""}</div>
+        <div>Line: ${pick.line ?? ""}</div>
+        <div>Book: ${pick.book || ""}</div>
+        <div>Odds: ${pick.odds ?? ""}</div>
+        <div>Implied Prob: ${pick.impliedProb ?? ""}</div>
+        <div>${pick.notes || ""}</div>
+      </div>
+    `;
+  }
+
+  function renderSection(element, items) {
+    if (!element) return;
+    if (!items || !items.length) {
+      element.innerHTML = `<div class="pick-card">No live props found.</div>`;
+      return;
+    }
+    element.innerHTML = items.map(renderCard).join("");
+  }
+
+  async function loadLiveProps() {
+    try {
+      els.statusText.textContent = "Loading live NHL props...";
+
+      const response = await fetch(`${BACKEND_URL}/api/top-ev-picks?sport=NHL`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
       }
 
+      const data = await response.json();
 
-      function renderCards(arr, container) {
-        if (!arr || !arr.length) {
-          container.innerHTML = `<div class="status">No picks found.</div>`;
-          return;
-        }
-        container.innerHTML = arr.map(p => `
-          <div class="card">
-            <div><b>Player:</b> ${p.player ?? ""}</div>
-            <div><b>Market:</b> ${p.market ?? ""}</div>
-            <div><b>Side:</b> ${p.side ?? ""}</div>
-            <div><b>Line:</b> ${p.line ?? ""}</div>
-            <div><b>Book:</b> ${p.book ?? ""}</div>
-            <div><b>Odds:</b> ${p.odds ?? ""}</div>
-            <div><b>Implied %:</b> ${p.impliedProb ?? ""}</div>
-            <div><b>Notes:</b> ${p.notes ?? ""}</div>
-          </div>
-        `).join("");
+      const topPoints = data.topPoints || [];
+      const topAssists = data.topAssists || [];
+      const topShots = data.topShots || [];
+      const allPicksCount = data.allPicksCount || 0;
+
+      renderSection(els.pointsSection, topPoints);
+      renderSection(els.assistsSection, topAssists);
+      renderSection(els.shotsSection, topShots);
+
+      if (els.allPicksCount) {
+        els.allPicksCount.textContent = allPicksCount;
       }
 
-
-      async function loadLiveProps() {
-        const book = els.book.value !== "all" ? els.book.value : undefined;
-        const params = new URLSearchParams();
-        if (book) params.set("book", book);
-
-        const url = `${BACKEND_URL}/api/top-ev-picks?${params.toString()}`;
-
-        els.statusText.textContent = "Loading live data...";
-
-        try {
-          const res = await fetch(url);
-          if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-          }
-
-          const data = await res.json();
-          els.allPicksCount.textContent = `Total live props: ${data.allPicksCount ?? 0}`;
-          renderCards(data.topPoints, els.topPointsCards);
-          renderCards(data.topAssists, els.topAssistsCards);
-          renderCards(data.topShots, els.topShotsCards);
-          els.statusText.innerHTML = `<span class="ok">Loaded live props.</span>`;
-        } catch (err) {
-          els.allPicksCount.textContent = "";
-          els.topPointsCards.innerHTML = els.topAssistsCards.innerHTML = els.topShotsCards.innerHTML = "<div class='status'>Failed to load live backend data.</div>";
-          els.statusText.innerHTML = `<span class="error">Error loading live data. Check backend URL, CORS, and endpoint response.</span>`;
-        }
+      els.statusText.textContent = "Loaded live NHL props successfully.";
+    } catch (error) {
+      if (els.pointsSection) {
+        els.pointsSection.innerHTML = `<div class=\"pick-card\">Failed to load live backend data.</div>`;
+      }
+      if (els.assistsSection) {
+        els.assistsSection.innerHTML = `<div class=\"pick-card\">Failed to load live backend data.</div>`;
+      }
+      if (els.shotsSection) {
+        els.shotsSection.innerHTML = `<div class=\"pick-card\">Failed to load live backend data.</div>`;
       }
 
-      els.loadBtn.addEventListener("click", loadLiveProps);
+      els.statusText.textContent = "Error loading live data. Check backend URL, CORS, and endpoint response.";
+      console.error(error);
+    }
+  }
 
-      els.resetBtn.addEventListener("click", () => {
-        els.sport.value = "NHL";
-        els.market.value = "all";
-        els.book.value = "all";
-        els.team.value = "";
-        els.minEv.value = 2;
-        els.allPicksCount.textContent = "";
-        els.topPointsCards.innerHTML = els.topAssistsCards.innerHTML = els.topShotsCards.innerHTML = "";
-        els.statusText.textContent = "Ready to load live data.";
-      });
+  if (els.loadBtn) {
+    els.loadBtn.addEventListener("click", loadLiveProps);
+  }
+
+  if (els.resetBtn) {
+    els.resetBtn.addEventListener("click", () => {
+      if (els.pointsSection) els.pointsSection.innerHTML = "";
+      if (els.assistsSection) els.assistsSection.innerHTML = "";
+      if (els.shotsSection) els.shotsSection.innerHTML = "";
+      if (els.allPicksCount) els.allPicksCount.textContent = "0";
+      els.statusText.textContent = "Ready to load live data.";
+    });
+  }
+
+  loadLiveProps();
     </script>
   </body>
 </html>
