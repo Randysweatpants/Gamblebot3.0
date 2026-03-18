@@ -68,7 +68,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
     return res.status(500).json({ error: "ODDS_API_KEY is not set in process.env" });
   }
 
-  const sport = String(req.query.sport || "icehockey_nhl");
+  const sport = req.query.sport === "NHL" ? "icehockey_nhl" : String(req.query.sport || "icehockey_nhl");
   const market = String(req.query.market || "playerprops");
   const book = req.query.book ? String(req.query.book) : undefined;
   const team = req.query.team ? String(req.query.team) : undefined;
