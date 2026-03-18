@@ -68,81 +68,103 @@ app.get("/api/top-ev-picks", async (req, res) => {
     return res.status(500).json({ error: "ODDS_API_KEY is not set in process.env" });
   }
 
-  const sport = req.query.sport === "NHL" ? "icehockey_nhl" : String(req.query.sport || "icehockey_nhl");
-  const market = String(req.query.market || "h2h");
-  const book = req.query.book ? String(req.query.book) : undefined;
-  const team = req.query.team ? String(req.query.team) : undefined;
+  const sport = "icehockey_nhl";
   const minEv = req.query.minEv ? Number(req.query.minEv) : -Infinity;
+  const book = req.query.book ? String(req.query.book) : undefined;
 
-  const url = new URL(`https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sport)}/odds`);
-  url.searchParams.set("apiKey", apiKey);
-  url.searchParams.set("regions", "us");
-  url.searchParams.set("markets", market);
-  url.searchParams.set("oddsFormat", "american");
-  url.searchParams.set("dateFormat", "iso");
-  if (book) url.searchParams.set("bookmakers", book);
-  if (team) url.searchParams.set("teams", team);
+  const eventListUrl = new URL(`https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sport)}/odds`);
+  eventListUrl.searchParams.set("apiKey", apiKey);
+  eventListUrl.searchParams.set("regions", "us");
+  eventListUrl.searchParams.set("markets", "h2h");
+  eventListUrl.searchParams.set("oddsFormat", "american");
+  eventListUrl.searchParams.set("dateFormat", "iso");
+  if (book) eventListUrl.searchParams.set("bookmakers", book);
 
   try {
-    const response = await fetch(url.toString());
-    if (!response.ok) {
-      const text = await response.text();
-      return res.status(response.status).json({ error: "failed fetching odds", details: text });
+    const listResponse = await fetch(eventListUrl.toString());
+    if (!listResponse.ok) {
+      const text = await listResponse.text();
+      return res.status(listResponse.status).json({ error: "failed fetching event list", details: text });
     }
 
-    const data = await response.json();
+    const listData = await listResponse.json();
+    const eventIds = Array.isArray(listData)
+      ? listData.map((event) => event.id ?? event.event_id).filter(Boolean)
+      : [];
 
+    const markets = ["player_points", "player_assists", "player_shots_on_goal"];
     const picks = [];
 
-    if (Array.isArray(data)) {
-      for (const event of data) {
-        const teams = Array.isArray(event.teams) ? event.teams : [];
-        const [homeTeam, awayTeam] = teams;
-        const oppMap = {
-          [homeTeam]: awayTeam,
-          [awayTeam]: homeTeam,
-        };
+    await Promise.all(
+      eventIds.map(async (eventId) => {
+        const oddsUrl = new URL(
+          `https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sport)}/events/${encodeURIComponent(
+            eventId
+          )}/odds`
+        );
+        oddsUrl.searchParams.set("apiKey", apiKey);
+        oddsUrl.searchParams.set("regions", "us");
+        oddsUrl.searchParams.set("markets", markets.join(","));
+        oddsUrl.searchParams.set("oddsFormat", "american");
+        oddsUrl.searchParams.set("dateFormat", "iso");
+        if (book) oddsUrl.searchParams.set("bookmakers", book);
 
-        const bookmakers = Array.isArray(event.bookmakers) ? event.bookmakers : [];
-        for (const bookmaker of bookmakers) {
-          if (book && bookmaker.key !== book) continue;
-          const bookName = bookmaker.title || bookmaker.key || "";
-          const markets = Array.isArray(bookmaker.markets) ? bookmaker.markets : [];
-          for (const m of markets) {
-            if (market && m.key !== market) continue;
-            const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
+        const oddsResponse = await fetch(oddsUrl.toString());
+        if (!oddsResponse.ok) {
+          return; // ignore failures for individual events
+        }
 
-            for (const outcome of outcomes) {
-              const oddsValue = outcome.price ?? outcome.odds ?? 0;
-              const impliedProb = americanToImpliedProbability(oddsValue) ?? 0;
-              const fairProb = impliedProb;
-              const ev = impliedProb; // placeholder: without projection, EV is just implied probability
+        const oddsData = await oddsResponse.json();
+        if (!Array.isArray(oddsData)) return;
 
-              const pick = normalizePick({
-                player: outcome.name || "",
-                team: outcome.name || "",
-                opp: oppMap[outcome.name] || "",
-                market: m.key || market,
-                line: outcome.point ?? 0,
-                side: outcome.name || "",
-                book: bookName,
-                odds: oddsValue,
-                proj: 0,
-                fairProb,
-                impliedProb,
-                ev,
-                confidence: 0,
-                notes: "raw normalized odds data",
-              });
+        for (const event of oddsData) {
+          const teams = Array.isArray(event.teams) ? event.teams : [];
+          const [homeTeam, awayTeam] = teams;
+          const oppMap = {
+            [homeTeam]: awayTeam,
+            [awayTeam]: homeTeam,
+          };
 
-              if (ev >= minEv) {
-                picks.push(pick);
+          const bookmakers = Array.isArray(event.bookmakers) ? event.bookmakers : [];
+          for (const bookmaker of bookmakers) {
+            if (book && bookmaker.key !== book) continue;
+            const bookName = bookmaker.title || bookmaker.key || "";
+            const marketsList = Array.isArray(bookmaker.markets) ? bookmaker.markets : [];
+
+            for (const m of marketsList) {
+              if (!markets.includes(m.key)) continue;
+              const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
+
+              for (const outcome of outcomes) {
+                const oddsValue = outcome.price ?? outcome.odds ?? 0;
+                const impliedProb = americanToImpliedProbability(oddsValue) ?? 0;
+
+                const pick = normalizePick({
+                  player: outcome.name || "",
+                  team: outcome.name || "",
+                  opp: oppMap[outcome.name] || "",
+                  market: m.key,
+                  line: outcome.point ?? 0,
+                  side: outcome.name || "",
+                  book: bookName,
+                  odds: oddsValue,
+                  proj: 0,
+                  fairProb: 0,
+                  impliedProb,
+                  ev: 0,
+                  confidence: 0,
+                  notes: "live prop odds - projection pending",
+                });
+
+                if (impliedProb >= minEv) {
+                  picks.push(pick);
+                }
               }
             }
           }
         }
-      }
-    }
+      })
+    );
 
     return res.json({ picks });
   } catch (error) {
