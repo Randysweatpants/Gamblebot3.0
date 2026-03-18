@@ -159,7 +159,11 @@ app.get("/api/top-ev-picks", async (req, res) => {
       })
     );
 
-    return res.json({ picks });
+    const topPoints = picks.filter(p => p.market === "Points").sort((a, b) => b.impliedProb - a.impliedProb).slice(0, 10);
+    const topAssists = picks.filter(p => p.market === "Assists").sort((a, b) => b.impliedProb - a.impliedProb).slice(0, 10);
+    const topShots = picks.filter(p => p.market === "Shots on Goal").sort((a, b) => b.impliedProb - a.impliedProb).slice(0, 10);
+
+    return res.json({ topPoints, topAssists, topShots, allPicksCount: 0
   } catch (error) {
     return res.status(500).json({ error: "request failed", details: String(error) });
   }
