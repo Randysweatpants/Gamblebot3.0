@@ -1,3 +1,52 @@
+.prop-card-main-row {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+}
+.prop-card-main-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.prop-card-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.prop-card-meta, .prop-card-line, .prop-card-book, .prop-card-odds, .prop-card-implied, .prop-card-fair, .prop-card-ev {
+  font-size: 0.98rem;
+  color: var(--muted);
+}
+.prop-card-fair b, .prop-card-ev b {
+  font-size: 1.08rem;
+  color: var(--accent);
+}
+.prop-card-ev .ev-positive {
+  color: var(--accent-2);
+}
+.prop-card-ev .ev-negative {
+  color: var(--danger);
+}
+.prop-card {
+  margin-bottom: 18px;
+  border: 2px solid var(--border);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  padding: 18px 18px 12px 18px;
+}
+.all-picks-count {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 12px 0 0 8px;
+}
+.ev-positive {
+  background: rgba(139, 255, 181, 0.16);
+  color: var(--accent-2);
+}
+.ev-negative {
+  background: rgba(255, 138, 138, 0.14);
+  color: var(--danger);
+}
 :root {
   color-scheme: dark;
   --bg: #07111f;

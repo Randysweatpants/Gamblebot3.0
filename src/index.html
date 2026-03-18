@@ -27,6 +27,7 @@
         </div>
       </header>
 
+      <div id="all-picks-count" class="all-picks-count"></div>
       <main>
         <section class="controls card">
           <div class="section-title-row">
@@ -87,11 +88,6 @@
 
         <section class="stats-grid">
           <article class="card stat-card">
-            <p class="stat-label">Total props</p>
-            <p id="stat-total" class="stat-value">—</p>
-            <p class="stat-subtext">Filtered board size</p>
-          </article>
-          <article class="card stat-card">
             <p class="stat-label">Best overall EV</p>
             <p id="stat-best-ev" class="stat-value success">—</p>
             <p id="stat-best-player" class="stat-subtext">Waiting for data</p>
@@ -112,24 +108,36 @@
           <article class="card">
             <div class="section-title-row compact">
               <div>
-                <p class="section-kicker">Top edges</p>
-                <h2>Best overs</h2>
+                <p class="section-kicker">Top 10 Points</p>
+                <h2>Top 10 Points Props</h2>
               </div>
             </div>
-            <div id="top-over-list" class="prop-list empty-state">
-              Load the board to see the strongest overs.
+            <div id="top-points-list" class="prop-list empty-state">
+              Load the board to see the top points props.
             </div>
           </article>
 
           <article class="card">
             <div class="section-title-row compact">
               <div>
-                <p class="section-kicker">Top edges</p>
-                <h2>Best unders</h2>
+                <p class="section-kicker">Top 10 Assists</p>
+                <h2>Top 10 Assists Props</h2>
               </div>
             </div>
-            <div id="top-under-list" class="prop-list empty-state">
-              Load the board to see the strongest unders.
+            <div id="top-assists-list" class="prop-list empty-state">
+              Load the board to see the top assists props.
+            </div>
+          </article>
+
+          <article class="card">
+            <div class="section-title-row compact">
+              <div>
+                <p class="section-kicker">Top 10 Shots on Goal EV</p>
+                <h2>Top 10 Shots on Goal EV</h2>
+              </div>
+            </div>
+            <div id="top-shots-list" class="prop-list empty-state">
+              Load the board to see the top shots on goal props.
             </div>
           </article>
         </section>
@@ -170,14 +178,23 @@
       </main>
     </div>
 
+
     <template id="prop-card-template">
       <article class="prop-card">
-        <div class="prop-card-top">
-          <div>
-            <p class="prop-player"></p>
-            <p class="prop-meta"></p>
+        <div class="prop-card-main-row">
+          <div class="prop-card-main-col">
+            <div class="prop-card-row">
+              <span class="prop-player"></span>
+              <span class="pill prop-side"></span>
+            </div>
+            <div class="prop-card-row prop-card-meta"></div>
+            <div class="prop-card-row prop-card-line"></div>
+            <div class="prop-card-row prop-card-book"></div>
+            <div class="prop-card-row prop-card-odds"></div>
+            <div class="prop-card-row prop-card-implied"></div>
+            <div class="prop-card-row prop-card-fair"></div>
+            <div class="prop-card-row prop-card-ev"></div>
           </div>
-          <span class="pill prop-side"></span>
         </div>
         <div class="prop-card-stats"></div>
         <p class="prop-notes"></p>

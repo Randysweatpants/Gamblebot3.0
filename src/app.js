@@ -1,3 +1,5 @@
+// Show all picks count near top
+const allPicksCountEl = document.getElementById("all-picks-count");
 const state = {
   props: [],
   topEv: null,
@@ -16,7 +18,6 @@ const els = {
   team: document.getElementById("team"),
   minEV: document.getElementById("min_ev"),
   date: document.getElementById("date"),
-  statTotal: document.getElementById("stat-total"),
   statBestEV: document.getElementById("stat-best-ev"),
   statBestPlayer: document.getElementById("stat-best-player"),
   statTopOver: document.getElementById("stat-top-over"),
@@ -97,7 +98,6 @@ async function fetchJSON(path, options = {}) {
 }
 
 function renderStatCards() {
-  els.statTotal.textContent = state.props.length ? state.props.length : "0";
 
   if (state.topEv) {
     els.statBestEV.textContent = currencyPercent(state.topEv.best_ev);
@@ -125,9 +125,9 @@ function renderStatCards() {
   }
 }
 
-function makeMiniStat(label, value) {
+function makeMiniStat(label, value, extraClass = "") {
   const span = document.createElement("span");
-  span.className = "pill";
+  span.className = `pill ${extraClass}`.trim();
   span.textContent = `${label}: ${value}`;
   return span;
 }
@@ -135,21 +135,36 @@ function makeMiniStat(label, value) {
 function createPropCard(prop) {
   const fragment = els.propCardTemplate.content.cloneNode(true);
   fragment.querySelector(".prop-player").textContent = prop.player_name;
-  fragment.querySelector(".prop-meta").textContent = `${prop.game} • ${marketLabel(prop.market)} ${prop.line} • ${prop.sportsbook}`;
-
+  // Side
   const side = fragment.querySelector(".prop-side");
   side.textContent = prop.best_side ? prop.best_side.toUpperCase() : "N/A";
   side.classList.add(prop.best_side === "under" ? "under" : "over");
-
-  const statsWrap = fragment.querySelector(".prop-card-stats");
-  statsWrap.append(
-    makeMiniStat("EV", currencyPercent(prop.best_ev)),
-    makeMiniStat("Proj", decimal(prop.projection)),
-    makeMiniStat("Conf", prop.confidence ?? "—")
-  );
-
+  // Market
+  fragment.querySelector(".prop-card-meta").textContent = `Market: ${marketLabel(prop.market)}`;
+  // Line
+  fragment.querySelector(".prop-card-line").textContent = `Line: ${decimal(prop.line, 2)}`;
+  // Book
+  fragment.querySelector(".prop-card-book").textContent = `Book: ${prop.sportsbook ?? "—"}`;
+  // Odds
+  fragment.querySelector(".prop-card-odds").textContent = `Odds: ${prop.odds ?? "—"}`;
+  // Implied Prob
+  fragment.querySelector(".prop-card-implied").textContent = `Implied Prob: ${typeof prop.implied_prob === "number" ? currencyPercent(prop.implied_prob) : "—"}`;
+  // Fair Prob (prominent for shots)
+  const fairProbText = typeof prop.fair_prob === "number" ? currencyPercent(prop.fair_prob) : "—";
+  fragment.querySelector(".prop-card-fair").innerHTML = prop.market === "shots_on_goal" ? `<b>Fair Prob: ${fairProbText}</b>` : `Fair Prob: ${fairProbText}`;
+  // EV (prominent for shots)
+  let evClass = "";
+  if (typeof prop.ev === "number") {
+    if (prop.ev > 0) evClass = "ev-positive";
+    else if (prop.ev < 0) evClass = "ev-negative";
+  }
+  const evText = typeof prop.ev === "number" ? currencyPercent(prop.ev) : "—";
+  fragment.querySelector(".prop-card-ev").innerHTML = prop.market === "shots_on_goal" ? `<b>EV: <span class="${evClass}">${evText}</span></b>` : `EV: <span class="${evClass}">${evText}</span>`;
+  // Notes
   const noteText = prop.matchup_notes || "Model and matchup notes will appear here once the API returns them.";
   fragment.querySelector(".prop-notes").textContent = noteText;
+  // Remove old stats area (optional, or repurpose for extra info)
+  fragment.querySelector(".prop-card-stats").innerHTML = '';
   return fragment;
 }
 
@@ -161,13 +176,17 @@ function renderTopLists() {
       target.textContent = emptyMessage;
       return;
     }
-
     target.className = "prop-list";
-    items.slice(0, 5).forEach((prop) => target.appendChild(createPropCard(prop)));
+    items.slice(0, 10).forEach((prop) => target.appendChild(createPropCard(prop)));
   };
 
-  renderInto(els.topOverList, state.topOver, "No over edges returned for this filter set.");
-  renderInto(els.topUnderList, state.topUnder, "No under edges returned for this filter set.");
+  // Filter and render top 10 for each market
+  const points = state.props.filter(p => p.market === "points");
+  const assists = state.props.filter(p => p.market === "assists");
+  const shots = state.props.filter(p => p.market === "shots_on_goal");
+  renderInto(document.getElementById("top-points-list"), points, "No points props returned for this filter set.");
+  renderInto(document.getElementById("top-assists-list"), assists, "No assists props returned for this filter set.");
+  renderInto(document.getElementById("top-shots-list"), shots, "No shots on goal props returned for this filter set.");
 }
 
 function renderTable() {
@@ -236,9 +255,13 @@ async function loadBoard() {
       .filter((prop) => typeof prop.best_ev === "number")
       .sort((a, b) => b.best_ev - a.best_ev)[0] || null;
 
+
     renderStatCards();
     renderTopLists();
     renderTable();
+    if (allPicksCountEl) {
+      allPicksCountEl.textContent = `All picks: ${state.props.length}`;
+    }
 
     els.tableMeta.textContent = `${state.props.length} props • ${params.sport} • ${params.date}`;
   } catch (error) {
