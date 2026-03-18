@@ -62,6 +62,7 @@ function normalizePick({
   };
 }
 
+
 app.get("/api/top-ev-picks", async (req, res) => {
   const apiKey = process.env.ODDS_API_KEY;
   if (!apiKey) {
@@ -69,7 +70,6 @@ app.get("/api/top-ev-picks", async (req, res) => {
   }
 
   const sport = "icehockey_nhl";
-  const minEv = req.query.minEv ? Number(req.query.minEv) : -Infinity;
   const book = req.query.book ? String(req.query.book) : undefined;
 
   const eventListUrl = new URL(`https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sport)}/odds`);
@@ -84,7 +84,10 @@ app.get("/api/top-ev-picks", async (req, res) => {
     const listResponse = await fetch(eventListUrl.toString());
     if (!listResponse.ok) {
       const text = await listResponse.text();
-      return res.status(listResponse.status).json({ error: "failed fetching event list", details: text });
+      return res.status(listResponse.status).json({
+        error: "failed fetching event list",
+        details: text,
+      });
     }
 
     const listData = await listResponse.json();
@@ -96,16 +99,15 @@ app.get("/api/top-ev-picks", async (req, res) => {
     const marketMap = {
       player_points: "Points",
       player_assists: "Assists",
-      player_shots_on_goal: "Shots on Goal"
+      player_shots_on_goal: "Shots on Goal",
     };
+
     const picks = [];
 
     await Promise.all(
       eventIds.map(async (eventId) => {
         const oddsUrl = new URL(
-          `https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sport)}/events/${encodeURIComponent(
-            eventId
-          )}/odds`
+          `https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sport)}/events/${encodeURIComponent(eventId)}/odds`
         );
         oddsUrl.searchParams.set("apiKey", apiKey);
         oddsUrl.searchParams.set("regions", "us");
@@ -116,7 +118,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
 
         const oddsResponse = await fetch(oddsUrl.toString());
         if (!oddsResponse.ok) {
-          return; // ignore failures for individual events
+          return;
         }
 
         const oddsData = await oddsResponse.json();
@@ -124,11 +126,13 @@ app.get("/api/top-ev-picks", async (req, res) => {
 
         for (const bookmaker of bookmakers) {
           if (book && bookmaker.key !== book) continue;
+
           const bookName = bookmaker.title || bookmaker.key || "";
           const marketsList = Array.isArray(bookmaker.markets) ? bookmaker.markets : [];
 
           for (const m of marketsList) {
             if (!markets.includes(m.key)) continue;
+
             const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
 
             for (const outcome of outcomes) {
@@ -159,13 +163,32 @@ app.get("/api/top-ev-picks", async (req, res) => {
       })
     );
 
-    const topPoints = picks.filter(p => p.market === "Points").sort((a, b) => b.impliedProb - a.impliedProb).slice(0, 10);
-    const topAssists = picks.filter(p => p.market === "Assists").sort((a, b) => b.impliedProb - a.impliedProb).slice(0, 10);
-    const topShots = picks.filter(p => p.market === "Shots on Goal").sort((a, b) => b.impliedProb - a.impliedProb).slice(0, 10);
+    const topPoints = picks
+      .filter((p) => p.market === "Points")
+      .sort((a, b) => b.impliedProb - a.impliedProb)
+      .slice(0, 10);
 
-    return res.json({ topPoints, topAssists, topShots, allPicksCount: 0
+    const topAssists = picks
+      .filter((p) => p.market === "Assists")
+      .sort((a, b) => b.impliedProb - a.impliedProb)
+      .slice(0, 10);
+
+    const topShots = picks
+      .filter((p) => p.market === "Shots on Goal")
+      .sort((a, b) => b.impliedProb - a.impliedProb)
+      .slice(0, 10);
+
+    return res.json({
+      topPoints,
+      topAssists,
+      topShots,
+      allPicksCount: picks.length,
+    });
   } catch (error) {
-    return res.status(500).json({ error: "request failed", details: String(error) });
+    return res.status(500).json({
+      error: "request failed",
+      details: String(error),
+    });
   }
 });
 
