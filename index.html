@@ -113,6 +113,61 @@
       .green { color: #86efac; font-weight: 700; }
       .yellow { color: #fcd34d; font-weight: 700; }
       .red { color: #fca5a5; font-weight: 700; }
+      .pick-card {
+        background: #0b1220;
+        border: 1px solid #223047;
+        border-radius: 14px;
+        padding: 14px;
+        margin-bottom: 12px;
+      }
+      .pick-card-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .pick-player {
+        font-size: 16px;
+        font-weight: 700;
+      }
+      .pick-market {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .pick-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 12px;
+      }
+      .pick-row {
+        display: flex;
+        gap: 6px;
+        align-items: baseline;
+      }
+      .pick-label {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .pick-value {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .pick-notes {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .pill {
+        border-radius: 999px;
+        padding: 4px 9px;
+        font-size: 12px;
+        font-weight: 800;
+        border: 1px solid #334155;
+      }
+      .pill-neutral { color: var(--text); }
+      .pill-green { color: #86efac; border-color: #166534; background: rgba(34, 197, 94, 0.12); }
+      .pill-red { color: #fca5a5; border-color: #7f1d1d; background: rgba(239, 68, 68, 0.12); }
       @media (max-width: 1000px) {
         .toolbar { grid-template-columns: 1fr 1fr; }
         .table-wrap { overflow-x: auto; }
@@ -174,11 +229,9 @@
       <div class="status" id="statusText">Ready to load live data.</div>
 
       <div id="allPicksCount" class="status"></div>
-<div id="allPicksCount">0</div>
-
-<div id="topPointsSection"></div>
-<div id="topAssistsSection"></div>
-<div id="topShotsSection"></div>
+      <div id="topPointsSection"></div>
+      <div id="topAssistsSection"></div>
+      <div id="topShotsSection"></div>
     </div>
 
     <script>
@@ -194,17 +247,72 @@
     allPicksCount: document.getElementById("allPicksCount")
   };
 
+  function asDisplay(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    return String(value);
+  }
+
+  function asPercentDisplay(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    if (typeof value === "number") {
+      const percent = value <= 1 && value >= 0 ? value * 100 : value;
+      return `${percent.toFixed(1)}%`;
+    }
+    const str = String(value);
+    return str.includes("%") ? str : str;
+  }
+
+  function evNumber(value) {
+    if (typeof value === "number") return value;
+    if (typeof value === "string") {
+      const cleaned = value.replace(/%/g, "").trim();
+      const parsed = Number(cleaned);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    return 0;
+  }
+
+  function evPillClass(value) {
+    if (value > 0) return "pill pill-green";
+    if (value < 0) return "pill pill-red";
+    return "pill pill-neutral";
+  }
+
   function renderCard(pick) {
+    const market = pick.market || "";
+    const isShots = String(market).toLowerCase() === "shots on goal";
+    const evVal = evNumber(pick.ev);
+    const evText = asPercentDisplay(pick.ev);
+    const fairProbText = asPercentDisplay(pick.fairProb);
+
+    const prominent = isShots
+      ? `
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <span class="${evPillClass(evVal)}">EV ${evText}</span>
+          <span class="pill pill-neutral">Fair Prob ${fairProbText}</span>
+        </div>
+      `
+      : "";
+
     return `
       <div class="pick-card">
-        <div><strong>${pick.player || ""}</strong></div>
-        <div>Market: ${pick.market || ""}</div>
-        <div>Side: ${pick.side || ""}</div>
-        <div>Line: ${pick.line ?? ""}</div>
-        <div>Book: ${pick.book || ""}</div>
-        <div>Odds: ${pick.odds ?? ""}</div>
-        <div>Implied Prob: ${pick.impliedProb ?? ""}</div>
-        <div>${pick.notes || ""}</div>
+        <div class="pick-card-head">
+          <div>
+            <div class="pick-player">${asDisplay(pick.player)}</div>
+            <div class="pick-market">${asDisplay(pick.market)}</div>
+          </div>
+          ${prominent}
+        </div>
+        <div class="pick-grid">
+          <div class="pick-row"><span class="pick-label">Side</span><span class="pick-value">${asDisplay(pick.side)}</span></div>
+          <div class="pick-row"><span class="pick-label">Line</span><span class="pick-value">${asDisplay(pick.line)}</span></div>
+          <div class="pick-row"><span class="pick-label">Book</span><span class="pick-value">${asDisplay(pick.book)}</span></div>
+          <div class="pick-row"><span class="pick-label">Odds</span><span class="pick-value">${asDisplay(pick.odds)}</span></div>
+          <div class="pick-row"><span class="pick-label">Implied Prob</span><span class="pick-value">${asPercentDisplay(pick.impliedProb)}</span></div>
+          <div class="pick-row"><span class="pick-label">Fair Prob</span><span class="pick-value">${fairProbText}</span></div>
+          <div class="pick-row"><span class="pick-label">EV</span><span class="pick-value ${evVal > 0 ? "green" : evVal < 0 ? "red" : ""}">${evText}</span></div>
+        </div>
+        <div class="pick-notes"><strong>Notes:</strong> ${asDisplay(pick.notes)}</div>
       </div>
     `;
   }
@@ -239,7 +347,7 @@
       renderSection(els.shotsSection, topShots);
 
       if (els.allPicksCount) {
-        els.allPicksCount.textContent = allPicksCount;
+        els.allPicksCount.textContent = `All picks: ${allPicksCount}`;
       }
 
       els.statusText.textContent = "Loaded live NHL props successfully.";
@@ -268,7 +376,7 @@
       if (els.pointsSection) els.pointsSection.innerHTML = "";
       if (els.assistsSection) els.assistsSection.innerHTML = "";
       if (els.shotsSection) els.shotsSection.innerHTML = "";
-      if (els.allPicksCount) els.allPicksCount.textContent = "0";
+      if (els.allPicksCount) els.allPicksCount.textContent = "All picks: 0";
       els.statusText.textContent = "Ready to load live data.";
     });
   }
