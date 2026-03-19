@@ -65,33 +65,109 @@ function normalizePick({
 
 // ============================================================
 // NHL Shots on Goal – Stats Adapter
-// Replace getPlayerSOGStats() body with a live stats source
-// (e.g. NHL API, Natural Stat Trick, MoneyPuck) when ready.
-// The mocked structure is kept so the projection engine and EV
-// logic work end-to-end against live odds today.
+// Source: official NHL API (api-web.nhle.com + search.d3.nhle.com)
+// teamShotsForPer60 and opponentShotsAllowedPer60 reserved for V2.
 // ============================================================
 
 const LEAGUE_AVG_SHOTS_ALLOWED_PER60 = 30.5; // approximate NHL team average
 
-/**
- * Returns per-player SOG stats keyed by player name.
- * All values are null until a real data source is wired in.
- * @param {string} _playerName
- * @returns {{ last10Avg: number|null, last5Avg: number|null, seasonAvg: number|null,
- *             avgTOI: number|null, avgPPTOI: number|null,
- *             teamShotsForPer60: number|null, opponentShotsAllowedPer60: number|null }}
- */
-function getPlayerSOGStats(_playerName) {
-  // TODO: replace stub with live lookup (e.g. fetch from NHL stats API by playerName)
+function nullStats() {
   return {
-    last10Avg: null,                   // player's last-10-game SOG average
-    last5Avg: null,                    // player's last-5-game SOG average
-    seasonAvg: null,                   // player's full-season SOG average
-    avgTOI: null,                      // average time on ice (minutes)
-    avgPPTOI: null,                    // average power-play TOI (minutes)
-    teamShotsForPer60: null,           // team shots-for per 60 min
-    opponentShotsAllowedPer60: null,   // opponent shots allowed per 60 min
+    last10Avg: null,
+    last5Avg: null,
+    seasonAvg: null,
+    avgTOI: null,
+    avgPPTOI: null,
+    teamShotsForPer60: null,
+    opponentShotsAllowedPer60: null,
   };
+}
+
+function parseTOIStr(toiStr) {
+  if (!toiStr || typeof toiStr !== "string") return null;
+  const parts = toiStr.split(":");
+  if (parts.length !== 2) return null;
+  const mins = parseInt(parts[0], 10);
+  const secs = parseInt(parts[1], 10);
+  if (isNaN(mins) || isNaN(secs)) return null;
+  return mins + secs / 60;
+}
+
+/**
+ * Fetch real NHL shots-on-goal stats for a player.
+ * Uses NHL player search API to resolve name -> playerId, then
+ * pulls the current-season game log from api-web.nhle.com.
+ *
+ * @param {string} playerName  Display name as returned by the Odds API
+ * @param {string} _teamName   Reserved for future team-level lookups
+ * @param {string} _oppName    Reserved for future opponent-level lookups
+ * @returns {Promise<object>}
+ */
+async function getPlayerSOGStats(playerName, _teamName, _oppName) {
+  try {
+    // Step 1: Resolve player name -> NHL playerId
+    const searchUrl =
+      `https://search.d3.nhle.com/api/v1/search/player` +
+      `?culture=en-us&limit=5&active=true&q=${encodeURIComponent(playerName)}`;
+    const searchResp = await fetch(searchUrl);
+    if (!searchResp.ok) return nullStats();
+    const searchResults = await searchResp.json();
+    if (!Array.isArray(searchResults) || searchResults.length === 0) return nullStats();
+
+    // Prefer exact name match, fall back to first result
+    const normalizedQuery = playerName.toLowerCase().trim();
+    const match =
+      searchResults.find((p) => (p.name || "").toLowerCase().trim() === normalizedQuery) ||
+      searchResults[0];
+    const playerId = match.playerId;
+    if (!playerId) return nullStats();
+
+    // Step 2: Fetch current-season game log (newest game first)
+    const gameLogUrl = `https://api-web.nhle.com/v1/player/${playerId}/game-log/now`;
+    const gameLogResp = await fetch(gameLogUrl);
+    if (!gameLogResp.ok) return nullStats();
+    const gameLogData = await gameLogResp.json();
+    const games = Array.isArray(gameLogData.gameLog) ? gameLogData.gameLog : [];
+    if (games.length === 0) return nullStats();
+
+    // Step 3: Compute rolling averages (require ≥3 games to avoid tiny samples)
+    const recent10 = games.slice(0, Math.min(10, games.length));
+    const recent5 = games.slice(0, Math.min(5, games.length));
+
+    const avgField = (arr, field) =>
+      arr.reduce((s, g) => s + Number(g[field] ?? 0), 0) / arr.length;
+
+    const last10Avg = recent10.length >= 3 ? avgField(recent10, "shots") : null;
+    const last5Avg = recent5.length >= 3 ? avgField(recent5, "shots") : null;
+    const seasonAvg = games.length >= 1 ? avgField(games, "shots") : null;
+
+    // Step 4: TOI – use recent 10 games
+    const toiVals = recent10.map((g) => parseTOIStr(g.toi)).filter((v) => v !== null);
+    const avgTOI = toiVals.length > 0
+      ? toiVals.reduce((s, v) => s + v, 0) / toiVals.length
+      : null;
+
+    // Step 5: PPTOI – field name varies by season; try common variants
+    const ppToiVals = recent10
+      .map((g) => parseTOIStr(g.ppToi ?? g.pptoi ?? g.powerPlayToi ?? null))
+      .filter((v) => v !== null);
+    const avgPPTOI = ppToiVals.length > 0
+      ? ppToiVals.reduce((s, v) => s + v, 0) / ppToiVals.length
+      : null;
+
+    return {
+      last10Avg,
+      last5Avg,
+      seasonAvg,
+      avgTOI,
+      avgPPTOI,
+      teamShotsForPer60: null,          // TODO V2: team shot-rate lookup
+      opponentShotsAllowedPer60: null,  // TODO V2: opponent environment lookup
+    };
+  } catch (err) {
+    console.error(`[SOG stats] NHL API error for "${playerName}":`, err.message);
+    return nullStats();
+  }
 }
 
 // --- Poisson helpers for fair-probability estimation ---
@@ -308,8 +384,8 @@ app.get("/api/top-ev-picks", async (req, res) => {
       const playerName = over.player;
       const line = over.line;
 
-      // Fetch player stats from adapter (placeholder until real source is wired)
-      const stats = getPlayerSOGStats(playerName);
+      // Fetch real player stats from NHL API (falls back to nullStats on any error)
+      const stats = await getPlayerSOGStats(playerName, over.team, over.opp);
       const projMean = computeProjectedSOG(stats);
 
       let fairOver, fairUnder, notesText, confScore;
@@ -327,7 +403,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
         // --- Model-based path: Poisson fair probabilities from projection ---
         ({ fairOver, fairUnder } = fairProbsFromProjection(projMean, line));
         confScore = Math.round((dataPointsAvailable / statFields.length) * 100);
-        notesText = "model EV estimate using recent SOG + role + opponent";
+        notesText = "model EV estimate using NHL recent SOG data";
       } else {
         // --- Fallback: no-vig removal when no player stats are available ---
         const pOver = over.impliedProb;
