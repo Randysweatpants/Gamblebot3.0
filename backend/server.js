@@ -65,11 +65,64 @@ function normalizePick({
 
 // ============================================================
 // NHL Shots on Goal – Stats Adapter
-// Source: official NHL API (api-web.nhle.com + search.d3.nhle.com)
-// teamShotsForPer60 and opponentShotsAllowedPer60 reserved for V2.
+// Sources:
+//   Player:  search.d3.nhle.com  (name -> playerId)
+//            api-web.nhle.com/v1/player/{id}/game-log/now
+//   Team env: api-web.nhle.com/v1/standings/now (shots for/against per game)
 // ============================================================
 
 const LEAGUE_AVG_SHOTS_ALLOWED_PER60 = 30.5; // approximate NHL team average
+
+// ---- Team standings cache (refreshed every 6 hours) ----
+let _standingsCache = null;
+let _standingsCacheTime = 0;
+const STANDINGS_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Fetches NHL standings and returns two lookup maps:
+ *   byAbbrev: { "BOS": { shotsForPerGame, shotsAgainstPerGame, fullName } }
+ *   byName:   { "boston bruins": "BOS" }
+ */
+async function getTeamStandingsMap() {
+  const now = Date.now();
+  if (_standingsCache && now - _standingsCacheTime < STANDINGS_TTL_MS) {
+    return _standingsCache;
+  }
+  try {
+    const resp = await fetch("https://api-web.nhle.com/v1/standings/now");
+    if (!resp.ok) return { byAbbrev: {}, byName: {} };
+    const data = await resp.json();
+    const standings = Array.isArray(data.standings) ? data.standings : [];
+    const byAbbrev = {};
+    const byName = {};
+    for (const team of standings) {
+      const abbrev = (
+        typeof team.teamAbbrev === "object" ? team.teamAbbrev.default : team.teamAbbrev
+      ) || "";
+      const fullName = (
+        typeof team.teamName === "object" ? team.teamName.default
+          : team.teamName
+      ) || (
+        typeof team.teamCommonName === "object" ? team.teamCommonName.default
+          : team.teamCommonName
+      ) || "";
+      if (!abbrev) continue;
+      const key = abbrev.toUpperCase();
+      byAbbrev[key] = {
+        shotsForPerGame: team.shotsForPerGame ?? null,
+        shotsAgainstPerGame: team.shotsAgainstPerGame ?? null,
+        fullName,
+      };
+      if (fullName) byName[fullName.toLowerCase()] = key;
+    }
+    _standingsCache = { byAbbrev, byName };
+    _standingsCacheTime = now;
+    return _standingsCache;
+  } catch (err) {
+    console.error("[Standings] fetch error:", err.message);
+    return { byAbbrev: {}, byName: {} };
+  }
+}
 
 function nullStats() {
   return {
@@ -94,16 +147,16 @@ function parseTOIStr(toiStr) {
 }
 
 /**
- * Fetch real NHL shots-on-goal stats for a player.
- * Uses NHL player search API to resolve name -> playerId, then
- * pulls the current-season game log from api-web.nhle.com.
+ * Fetch real NHL shots-on-goal stats for a player, including
+ * team shots-for and opponent shots-against from the standings.
  *
- * @param {string} playerName  Display name as returned by the Odds API
- * @param {string} _teamName   Reserved for future team-level lookups
- * @param {string} _oppName    Reserved for future opponent-level lookups
+ * @param {string} playerName   Display name from the Odds API
+ * @param {string} homeTeam     Full home team name from the Odds API event
+ * @param {string} awayTeam     Full away team name from the Odds API event
+ * @param {{ byAbbrev: object, byName: object }} standingsMap  Pre-fetched standings
  * @returns {Promise<object>}
  */
-async function getPlayerSOGStats(playerName, _teamName, _oppName) {
+async function getPlayerSOGStats(playerName, homeTeam, awayTeam, standingsMap) {
   try {
     // Step 1: Resolve player name -> NHL playerId
     const searchUrl =
@@ -121,6 +174,11 @@ async function getPlayerSOGStats(playerName, _teamName, _oppName) {
       searchResults[0];
     const playerId = match.playerId;
     if (!playerId) return nullStats();
+
+    // Extract the player's current team abbreviation from the search result
+    const playerTeamAbbrev = (
+      match.currentTeamAbbrev ?? match.teamAbbrev ?? ""
+    ).toUpperCase();
 
     // Step 2: Fetch current-season game log (newest game first)
     const gameLogUrl = `https://api-web.nhle.com/v1/player/${playerId}/game-log/now`;
@@ -155,14 +213,37 @@ async function getPlayerSOGStats(playerName, _teamName, _oppName) {
       ? ppToiVals.reduce((s, v) => s + v, 0) / ppToiVals.length
       : null;
 
+    // Step 6: Team shots-for environment from standings
+    let teamShotsForPer60 = null;
+    if (playerTeamAbbrev && standingsMap.byAbbrev[playerTeamAbbrev]) {
+      teamShotsForPer60 = standingsMap.byAbbrev[playerTeamAbbrev].shotsForPerGame ?? null;
+    }
+
+    // Step 7: Opponent shots-against environment from standings
+    // Determine which of the event's two teams is the opponent by cross-referencing
+    // the player's team abbreviation against both Odds API names.
+    let opponentShotsAllowedPer60 = null;
+    if (playerTeamAbbrev && homeTeam && awayTeam) {
+      const homeAbbrev = standingsMap.byName[homeTeam.toLowerCase()] ?? null;
+      const awayAbbrev = standingsMap.byName[awayTeam.toLowerCase()] ?? null;
+      const oppAbbrev =
+        homeAbbrev === playerTeamAbbrev ? awayAbbrev
+        : awayAbbrev === playerTeamAbbrev ? homeAbbrev
+        : null;
+      if (oppAbbrev && standingsMap.byAbbrev[oppAbbrev]) {
+        opponentShotsAllowedPer60 =
+          standingsMap.byAbbrev[oppAbbrev].shotsAgainstPerGame ?? null;
+      }
+    }
+
     return {
       last10Avg,
       last5Avg,
       seasonAvg,
       avgTOI,
       avgPPTOI,
-      teamShotsForPer60: null,          // TODO V2: team shot-rate lookup
-      opponentShotsAllowedPer60: null,  // TODO V2: opponent environment lookup
+      teamShotsForPer60,
+      opponentShotsAllowedPer60,
     };
   } catch (err) {
     console.error(`[SOG stats] NHL API error for "${playerName}":`, err.message);
@@ -217,7 +298,11 @@ function fairProbsFromProjection(projMean, line) {
  * @returns {number|null}
  */
 function computeProjectedSOG(stats) {
-  const { last10Avg, last5Avg, seasonAvg, avgTOI, avgPPTOI, opponentShotsAllowedPer60 } = stats;
+  const {
+    last10Avg, last5Avg, seasonAvg,
+    avgTOI, avgPPTOI,
+    teamShotsForPer60, opponentShotsAllowedPer60,
+  } = stats;
 
   // Weighted base from available rolling windows
   const windows = [
@@ -243,18 +328,31 @@ function computeProjectedSOG(stats) {
     toiAdjusted = Math.min(toiAdjusted + avgPPTOI * 0.05, toiAdjusted * 1.15);
   }
 
-  // Opponent shot-environment adjustment (10% weight bucket)
-  let oppAdjusted = baseProjected;
+  // Environment adjustment (10% weight bucket): blend team shots-for AND opp shots-against
+  // Scalars are capped so no single environment factor moves the projection more than ±20%.
+  let envSum = 0;
+  let envCount = 0;
   if (opponentShotsAllowedPer60 != null) {
     const oppScalar = Math.min(
       Math.max(opponentShotsAllowedPer60 / LEAGUE_AVG_SHOTS_ALLOWED_PER60, 0.8),
       1.2
     );
-    oppAdjusted = baseProjected * oppScalar;
+    envSum += baseProjected * oppScalar;
+    envCount++;
   }
+  if (teamShotsForPer60 != null) {
+    // Generous team shooting creates more individual opportunities
+    const teamScalar = Math.min(
+      Math.max(teamShotsForPer60 / LEAGUE_AVG_SHOTS_ALLOWED_PER60, 0.85),
+      1.15
+    );
+    envSum += baseProjected * teamScalar;
+    envCount++;
+  }
+  const envAdjusted = envCount > 0 ? envSum / envCount : baseProjected;
 
-  // Final blend: 80% base | 10% toi-adjusted | 10% opp-adjusted
-  return (baseProjected * 80 + toiAdjusted * 10 + oppAdjusted * 10) / 100;
+  // Final blend: 80% base | 10% toi-adjusted | 10% env-adjusted
+  return (baseProjected * 80 + toiAdjusted * 10 + envAdjusted * 10) / 100;
 }
 
 /** Decimal payout per $1 risked from American odds */
@@ -355,6 +453,9 @@ app.get("/api/top-ev-picks", async (req, res) => {
                 confidence: 0,
                 notes: "live prop odds - projection pending",
               });
+              // Store event context for team/opponent environment lookup
+              pick._homeTeam = oddsData.home_team || "";
+              pick._awayTeam = oddsData.away_team || "";
 
               picks.push(pick);
             }
@@ -374,6 +475,9 @@ app.get("/api/top-ev-picks", async (req, res) => {
       shotsGroups[key][pick.side] = pick;
     }
 
+    // Fetch standings once for the whole SOG loop (cached; one NHL API call)
+    const standingsMap = await getTeamStandingsMap();
+
     const topShots = [];
     for (const key of Object.keys(shotsGroups)) {
       const group = shotsGroups[key];
@@ -384,17 +488,25 @@ app.get("/api/top-ev-picks", async (req, res) => {
       const playerName = over.player;
       const line = over.line;
 
-      // Fetch real player stats from NHL API (falls back to nullStats on any error)
-      const stats = await getPlayerSOGStats(playerName, over.team, over.opp);
+      // Fetch real player stats + team/opp environment from NHL API
+      const stats = await getPlayerSOGStats(
+        playerName,
+        over._homeTeam || "",
+        over._awayTeam || "",
+        standingsMap
+      );
       const projMean = computeProjectedSOG(stats);
 
       let fairOver, fairUnder, notesText, confScore;
 
+      // 7-field confidence: rolling windows + TOI + PPTOI + team env + opp env
       const statFields = [
         stats.last10Avg,
         stats.last5Avg,
         stats.seasonAvg,
         stats.avgTOI,
+        stats.avgPPTOI,
+        stats.teamShotsForPer60,
         stats.opponentShotsAllowedPer60,
       ];
       const dataPointsAvailable = statFields.filter((v) => v != null).length;
