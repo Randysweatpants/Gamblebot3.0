@@ -168,6 +168,29 @@
       .pill-neutral { color: var(--text); }
       .pill-green { color: #86efac; border-color: #166534; background: rgba(34, 197, 94, 0.12); }
       .pill-red { color: #fca5a5; border-color: #7f1d1d; background: rgba(239, 68, 68, 0.12); }
+      .badge-model {
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        background: rgba(34, 197, 94, 0.15);
+        color: #86efac;
+        border: 1px solid #166534;
+      }
+      .badge-fallback {
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        background: rgba(245, 158, 11, 0.15);
+        color: #fcd34d;
+        border: 1px solid #92400e;
+      }
+      .ev-positive { color: #86efac; font-weight: 700; }
+      .ev-negative { color: #fca5a5; font-weight: 700; }
+      .ev-neutral  { color: var(--muted); font-weight: 700; }
       @media (max-width: 1000px) {
         .toolbar { grid-template-columns: 1fr 1fr; }
         .table-wrap { overflow-x: auto; }
@@ -284,15 +307,34 @@
     const evVal = evNumber(pick.ev);
     const evText = asPercentDisplay(pick.ev);
     const fairProbText = asPercentDisplay(pick.fairProb);
+    const evClass = evVal > 0 ? "ev-positive" : evVal < 0 ? "ev-negative" : "ev-neutral";
+
+    // Badge: only for Shots on Goal cards
+    let badgeHtml = "";
+    if (isShots) {
+      const notes = String(pick.notes || "");
+      if (notes.includes("model EV estimate using NHL recent SOG data")) {
+        badgeHtml = `<span class="badge-model">Model Pick</span>`;
+      } else if (notes.includes("no-vig fallback")) {
+        badgeHtml = `<span class="badge-fallback">Fallback</span>`;
+      }
+    }
 
     const prominent = isShots
       ? `
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          ${badgeHtml}
           <span class="${evPillClass(evVal)}">EV ${evText}</span>
-          <span class="pill pill-neutral">Fair Prob ${fairProbText}</span>
+          <span class="pill pill-neutral">Fair ${fairProbText}</span>
         </div>
       `
       : "";
+
+    // Extra rows shown only for Shots on Goal
+    const shotExtraRows = isShots ? `
+          <div class="pick-row"><span class="pick-label">Proj SOG</span><span class="pick-value">${pick.proj != null && pick.proj !== 0 ? Number(pick.proj).toFixed(2) : "—"}</span></div>
+          <div class="pick-row"><span class="pick-label">Confidence</span><span class="pick-value">${pick.confidence != null ? pick.confidence + "%" : "—"}</span></div>
+    ` : "";
 
     return `
       <div class="pick-card">
@@ -310,7 +352,8 @@
           <div class="pick-row"><span class="pick-label">Odds</span><span class="pick-value">${asDisplay(pick.odds)}</span></div>
           <div class="pick-row"><span class="pick-label">Implied Prob</span><span class="pick-value">${asPercentDisplay(pick.impliedProb)}</span></div>
           <div class="pick-row"><span class="pick-label">Fair Prob</span><span class="pick-value">${fairProbText}</span></div>
-          <div class="pick-row"><span class="pick-label">EV</span><span class="pick-value ${evVal > 0 ? "green" : evVal < 0 ? "red" : ""}">${evText}</span></div>
+          <div class="pick-row"><span class="pick-label">EV</span><span class="pick-value ${evClass}">${evText}</span></div>
+          ${shotExtraRows}
         </div>
         <div class="pick-notes"><strong>Notes:</strong> ${asDisplay(pick.notes)}</div>
       </div>
