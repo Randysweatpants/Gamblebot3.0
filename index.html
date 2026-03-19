@@ -336,6 +336,7 @@
       }
 
       const data = await response.json();
+      console.log("LIVE DATA", data);
 
       const topPoints = data.topPoints || [];
       const topAssists = data.topAssists || [];
@@ -352,17 +353,11 @@
 
       els.statusText.textContent = "Loaded live NHL props successfully.";
     } catch (error) {
-      if (els.pointsSection) {
-        els.pointsSection.innerHTML = `<div class=\"pick-card\">Failed to load live backend data.</div>`;
-      }
-      if (els.assistsSection) {
-        els.assistsSection.innerHTML = `<div class=\"pick-card\">Failed to load live backend data.</div>`;
-      }
-      if (els.shotsSection) {
-        els.shotsSection.innerHTML = `<div class=\"pick-card\">Failed to load live backend data.</div>`;
-      }
-
-      els.statusText.textContent = "Error loading live data. Check backend URL, CORS, and endpoint response.";
+      const errorStatus = error?.message || "Unknown error";
+      renderSection(els.pointsSection, []);
+      renderSection(els.assistsSection, []);
+      renderSection(els.shotsSection, []);
+      els.statusText.textContent = `No live props found. Error status: ${errorStatus}`;
       console.error(error);
     }
   }
