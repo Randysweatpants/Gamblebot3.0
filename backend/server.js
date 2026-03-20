@@ -361,6 +361,38 @@ function americanPayout(odds) {
   return 100 / Math.abs(odds);
 }
 
+function hasProjectionBuffer(pick) {
+  if (!Number.isFinite(pick.proj) || !Number.isFinite(pick.line)) return false;
+  if (pick.side === "Under") return pick.proj <= pick.line - 0.3;
+  if (pick.side === "Over") return pick.proj >= pick.line + 0.3;
+  return false;
+}
+
+function isBetterSportsbookPrice(candidateOdds, currentOdds) {
+  return Number(candidateOdds) > Number(currentOdds);
+}
+
+function cleanTopShots(topShots) {
+  const dedupedShots = new Map();
+
+  for (const pick of topShots) {
+    const isModelBased = pick.notes === "model EV estimate using NHL recent SOG data";
+    if (!isModelBased) continue;
+    if (pick.confidence < 55) continue;
+    if (!hasProjectionBuffer(pick)) continue;
+
+    const dedupeKey = `${pick.player}|${pick.side}|${pick.line}`;
+    const existingPick = dedupedShots.get(dedupeKey);
+    if (!existingPick || isBetterSportsbookPrice(pick.odds, existingPick.odds)) {
+      dedupedShots.set(dedupeKey, pick);
+    }
+  }
+
+  return Array.from(dedupedShots.values())
+    .sort((a, b) => b.ev - a.ev)
+    .slice(0, 10);
+}
+
 app.get("/api/top-ev-picks", async (req, res) => {
   const apiKey = process.env.ODDS_API_KEY;
   if (!apiKey) {
@@ -545,8 +577,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
       topShots.push(over, under);
     }
 
-    // Sort by EV descending, take top 10
-    const sortedTopShots = topShots.sort((a, b) => b.ev - a.ev).slice(0, 10);
+    const cleanedTopShots = cleanTopShots(topShots);
 
     // Placeholder logic for Points/Assists
     const topPoints = picks
@@ -562,7 +593,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
     return res.json({
       topPoints,
       topAssists,
-      topShots: sortedTopShots,
+      topShots: cleanedTopShots,
       allPicksCount: picks.length,
     });
   } catch (error) {
