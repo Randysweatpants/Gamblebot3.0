@@ -363,8 +363,8 @@ function americanPayout(odds) {
 
 function hasProjectionBuffer(pick) {
   if (!Number.isFinite(pick.proj) || !Number.isFinite(pick.line)) return false;
-  if (pick.side === "Under") return pick.proj <= pick.line - 0.3;
-  if (pick.side === "Over") return pick.proj >= pick.line + 0.3;
+  if (pick.side === "Under") return pick.proj <= pick.line - 0.2;
+  if (pick.side === "Over") return pick.proj >= pick.line + 0.2;
   return false;
 }
 
@@ -379,15 +379,13 @@ function getGameKey(pick) {
 }
 
 function cleanTopShots(topShots) {
+  const totalRawSOGPicks = topShots.length;
+  const modelBasedShots = topShots.filter(
+    (pick) => pick.notes === "model EV estimate using NHL recent SOG data"
+  );
   const dedupedShots = new Map();
 
-  for (const pick of topShots) {
-    const isModelBased = pick.notes === "model EV estimate using NHL recent SOG data";
-    if (!isModelBased) continue;
-    if (pick.confidence < 60) continue;
-    if (pick.ev < 0.05) continue;
-    if (!hasProjectionBuffer(pick)) continue;
-
+  for (const pick of modelBasedShots) {
     const dedupeKey = `${pick.player}|${pick.side}|${pick.line}`;
     const existingPick = dedupedShots.get(dedupeKey);
     const shouldReplace =
@@ -399,7 +397,12 @@ function cleanTopShots(topShots) {
     }
   }
 
-  const sortedByEv = Array.from(dedupedShots.values()).sort((a, b) => b.ev - a.ev);
+  const afterDedupe = Array.from(dedupedShots.values());
+  const afterConfidence = afterDedupe.filter((pick) => pick.confidence >= 55);
+  const afterEV = afterConfidence.filter((pick) => pick.ev >= 0.02);
+  const afterProjectionBuffer = afterEV.filter((pick) => hasProjectionBuffer(pick));
+
+  const sortedByEv = afterProjectionBuffer.sort((a, b) => b.ev - a.ev);
   const gameCounts = new Map();
   const cappedByGame = [];
 
@@ -411,7 +414,19 @@ function cleanTopShots(topShots) {
     gameCounts.set(gameKey, count + 1);
   }
 
-  return cappedByGame.sort((a, b) => b.ev - a.ev);
+  const finalTopShots = cappedByGame.sort((a, b) => b.ev - a.ev);
+
+  return {
+    topShots: finalTopShots,
+    debug: {
+      totalRawSOGPicks,
+      afterDedupe: afterDedupe.length,
+      afterConfidenceFilter: afterConfidence.length,
+      afterEVFilter: afterEV.length,
+      afterProjectionBuffer: afterProjectionBuffer.length,
+      finalReturnedPicks: finalTopShots.length,
+    },
+  };
 }
 
 app.get("/api/top-ev-picks", async (req, res) => {
@@ -598,7 +613,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
       topShots.push(over, under);
     }
 
-    const cleanedTopShots = cleanTopShots(topShots);
+    const cleanedTopShotsResult = cleanTopShots(topShots);
 
     // Placeholder logic for Points/Assists
     const topPoints = picks
@@ -614,7 +629,8 @@ app.get("/api/top-ev-picks", async (req, res) => {
     return res.json({
       topPoints,
       topAssists,
-      topShots: cleanedTopShots,
+      topShots: cleanedTopShotsResult.topShots,
+      topShotsDebug: cleanedTopShotsResult.debug,
       allPicksCount: picks.length,
     });
   } catch (error) {
