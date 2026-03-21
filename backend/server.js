@@ -372,25 +372,46 @@ function isBetterSportsbookPrice(candidateOdds, currentOdds) {
   return Number(candidateOdds) > Number(currentOdds);
 }
 
+function getGameKey(pick) {
+  const home = pick._homeTeam || "";
+  const away = pick._awayTeam || "";
+  return `${home}|${away}`;
+}
+
 function cleanTopShots(topShots) {
   const dedupedShots = new Map();
 
   for (const pick of topShots) {
     const isModelBased = pick.notes === "model EV estimate using NHL recent SOG data";
     if (!isModelBased) continue;
-    if (pick.confidence < 55) continue;
+    if (pick.confidence < 60) continue;
+    if (pick.ev < 0.05) continue;
     if (!hasProjectionBuffer(pick)) continue;
 
     const dedupeKey = `${pick.player}|${pick.side}|${pick.line}`;
     const existingPick = dedupedShots.get(dedupeKey);
-    if (!existingPick || isBetterSportsbookPrice(pick.odds, existingPick.odds)) {
+    const shouldReplace =
+      !existingPick
+      || isBetterSportsbookPrice(pick.odds, existingPick.odds)
+      || (Number(pick.odds) === Number(existingPick.odds) && Number(pick.ev) > Number(existingPick.ev));
+    if (shouldReplace) {
       dedupedShots.set(dedupeKey, pick);
     }
   }
 
-  return Array.from(dedupedShots.values())
-    .sort((a, b) => b.ev - a.ev)
-    .slice(0, 10);
+  const sortedByEv = Array.from(dedupedShots.values()).sort((a, b) => b.ev - a.ev);
+  const gameCounts = new Map();
+  const cappedByGame = [];
+
+  for (const pick of sortedByEv) {
+    const gameKey = getGameKey(pick);
+    const count = gameCounts.get(gameKey) ?? 0;
+    if (count >= 3) continue;
+    cappedByGame.push(pick);
+    gameCounts.set(gameKey, count + 1);
+  }
+
+  return cappedByGame.sort((a, b) => b.ev - a.ev);
 }
 
 app.get("/api/top-ev-picks", async (req, res) => {
