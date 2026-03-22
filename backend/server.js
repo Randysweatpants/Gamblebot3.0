@@ -820,7 +820,11 @@ function cleanTopShots(topShots) {
 }
 
 function cleanTopRebounds(topRebounds) {
+  const FALLBACK_NOTES = "no-vig fallback (NBA stats unavailable)";
+  const MODEL_NOTES = "model EV estimate using NBA recent rebounds data";
   const totalRawPicks = topRebounds.length;
+
+  // Dedupe by player + side + line, preferring better price then better EV
   const dedupedRebounds = new Map();
   for (const pick of topRebounds) {
     const dedupeKey = `${pick.player}|${pick.side}|${pick.line}`;
@@ -833,19 +837,43 @@ function cleanTopRebounds(topRebounds) {
   }
 
   const afterDedupe = Array.from(dedupedRebounds.values());
+
+  // Confidence filter: model picks require confidence >= 55; fallback picks always pass
   const afterConfidence = afterDedupe.filter((pick) => {
-    if (pick.notes === "model EV estimate using NBA recent rebounds data") {
-      return pick.confidence >= 55;
-    }
+    if (pick.notes === MODEL_NOTES) return pick.confidence >= 55;
     return true;
   });
-  const afterEV = afterConfidence.filter((pick) => pick.ev >= 0.02);
-  const afterProjectionBuffer = afterEV.filter((pick) => hasReboundProjectionBuffer(pick));
-  const sortedByEv = afterProjectionBuffer.sort((a, b) => b.ev - a.ev);
 
+  // EV filter: model picks require EV >= 2%; fallback picks always pass
+  const afterEV = afterConfidence.filter((pick) => {
+    if (pick.notes === FALLBACK_NOTES) return true;
+    return pick.ev >= 0.02;
+  });
+
+  // Projection buffer: apply only when proj > 0; if no projection exists, allow through
+  const afterProjectionBuffer = afterEV.filter((pick) => {
+    const hasProj = Number.isFinite(pick.proj) && pick.proj > 0;
+    if (!hasProj) return true;
+    return hasReboundProjectionBuffer(pick);
+  });
+
+  const afterFallbackMode = afterProjectionBuffer.filter(
+    (pick) => pick.notes === FALLBACK_NOTES
+  ).length;
+
+  // Model picks sorted by EV desc (placed first); fallback picks sorted by impliedProb desc
+  const sortedModel = afterProjectionBuffer
+    .filter((pick) => pick.notes === MODEL_NOTES)
+    .sort((a, b) => b.ev - a.ev);
+  const sortedFallback = afterProjectionBuffer
+    .filter((pick) => pick.notes !== MODEL_NOTES)
+    .sort((a, b) => b.impliedProb - a.impliedProb);
+  const sortedAll = [...sortedModel, ...sortedFallback];
+
+  // Cap 2 picks per game
   const gameCounts = new Map();
   const gameCapped = [];
-  for (const pick of sortedByEv) {
+  for (const pick of sortedAll) {
     const gameKey = getGameKey(pick);
     const count = gameCounts.get(gameKey) ?? 0;
     if (count >= 2) continue;
@@ -853,12 +881,15 @@ function cleanTopRebounds(topRebounds) {
     gameCounts.set(gameKey, count + 1);
   }
 
+  // Fallback fill to 5 picks if needed, maintaining sortedAll order
   let finalRebounds = [...gameCapped];
   if (finalRebounds.length < 5) {
     const selectedKeys = new Set(
-      finalRebounds.map((pick) => `${pick.player}|${pick.market}|${pick.side}|${pick.line}|${pick.book}`)
+      finalRebounds.map(
+        (pick) => `${pick.player}|${pick.market}|${pick.side}|${pick.line}|${pick.book}`
+      )
     );
-    for (const pick of sortedByEv) {
+    for (const pick of sortedAll) {
       const key = `${pick.player}|${pick.market}|${pick.side}|${pick.line}|${pick.book}`;
       if (selectedKeys.has(key)) continue;
       finalRebounds.push(pick);
@@ -867,16 +898,23 @@ function cleanTopRebounds(topRebounds) {
     }
   }
 
-  finalRebounds = finalRebounds.sort((a, b) => b.ev - a.ev).slice(0, 10);
+  // Cap at 10, preserve model-first ordering
+  finalRebounds = finalRebounds.slice(0, 10);
+
+  const nbaModelPickCount = finalRebounds.filter((p) => p.notes === MODEL_NOTES).length;
+  const nbaFallbackPickCount = finalRebounds.filter((p) => p.notes !== MODEL_NOTES).length;
 
   return {
     topRebounds: finalRebounds,
+    nbaModelPickCount,
+    nbaFallbackPickCount,
     debug: {
       totalRawReboundPicks: totalRawPicks,
       afterDedupe: afterDedupe.length,
       afterConfidenceFilter: afterConfidence.length,
       afterEVFilter: afterEV.length,
       afterProjectionBuffer: afterProjectionBuffer.length,
+      afterFallbackMode,
       afterGameCap: gameCapped.length,
       finalReturnedPicks: finalRebounds.length,
     },
@@ -1123,7 +1161,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
               fairOver = pOver / sum;
               fairUnder = pUnder / sum;
               confScore = 10;
-              notesText = "no-vig fallback (NBA rebounds stats unavailable)";
+              notesText = "no-vig fallback (NBA stats unavailable)";
             }
           } catch (err) {
             const pOver = over.impliedProb;
@@ -1133,7 +1171,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
             fairOver = pOver / sum;
             fairUnder = pUnder / sum;
             confScore = 10;
-            notesText = "no-vig fallback (NBA rebounds stats unavailable)";
+            notesText = "no-vig fallback (NBA stats unavailable)";
           }
 
           over.proj = proj;
@@ -1171,6 +1209,8 @@ app.get("/api/top-ev-picks", async (req, res) => {
         topShotsDebug: defaultShotsDebug,
         topRebounds: topReboundsWithTracking,
         topReboundsDebug: cleanedTopReboundsResult.debug,
+        nbaModelPickCount: cleanedTopReboundsResult.nbaModelPickCount,
+        nbaFallbackPickCount: cleanedTopReboundsResult.nbaFallbackPickCount,
         allPicksCount: picks.length,
         requestedSport,
         resolvedSportKey,
