@@ -767,6 +767,9 @@ function computeProjectedRebounds(stats) {
   return (baseProjection * 90 + minutesAdjusted * 10) / 100;
 }
 
+const NBA_REBOUNDS_FALLBACK_NOTES = "no-vig fallback (NBA stats unavailable)";
+const NBA_REBOUNDS_MODEL_NOTES = "model EV estimate using NBA recent rebounds data";
+
 /**
  * Compute a weighted projected SOG mean.
  * Weights: 35% L10 avg | 25% L5 avg | 20% season avg |
@@ -917,8 +920,6 @@ function cleanTopShots(topShots) {
 }
 
 function cleanTopRebounds(topRebounds) {
-  const FALLBACK_NOTES = "no-vig fallback (NBA stats unavailable)";
-  const MODEL_NOTES = "model EV estimate using NBA recent rebounds data";
   const totalRawPicks = topRebounds.length;
 
   // Dedupe by player + side + line, preferring better price then better EV
@@ -937,13 +938,13 @@ function cleanTopRebounds(topRebounds) {
 
   // Confidence filter: model picks require confidence >= 55; fallback picks always pass
   const afterConfidence = afterDedupe.filter((pick) => {
-    if (pick.notes === MODEL_NOTES) return pick.confidence >= 55;
+    if (pick.notes === NBA_REBOUNDS_MODEL_NOTES) return pick.confidence >= 55;
     return true;
   });
 
   // EV filter: model picks require EV >= 2%; fallback picks always pass
   const afterEV = afterConfidence.filter((pick) => {
-    if (pick.notes === FALLBACK_NOTES) return true;
+    if (pick.notes === NBA_REBOUNDS_FALLBACK_NOTES) return true;
     return pick.ev >= 0.02;
   });
 
@@ -955,15 +956,15 @@ function cleanTopRebounds(topRebounds) {
   });
 
   const afterFallbackMode = afterProjectionBuffer.filter(
-    (pick) => pick.notes === FALLBACK_NOTES
+    (pick) => pick.notes === NBA_REBOUNDS_FALLBACK_NOTES
   ).length;
 
   // Model picks sorted by EV desc (placed first); fallback picks sorted by impliedProb desc
   const sortedModel = afterProjectionBuffer
-    .filter((pick) => pick.notes === MODEL_NOTES)
+    .filter((pick) => pick.notes === NBA_REBOUNDS_MODEL_NOTES)
     .sort((a, b) => b.ev - a.ev);
   const sortedFallback = afterProjectionBuffer
-    .filter((pick) => pick.notes !== MODEL_NOTES)
+    .filter((pick) => pick.notes !== NBA_REBOUNDS_MODEL_NOTES)
     .sort((a, b) => b.impliedProb - a.impliedProb);
   const sortedAll = [...sortedModel, ...sortedFallback];
 
@@ -998,8 +999,8 @@ function cleanTopRebounds(topRebounds) {
   // Cap at 10, preserve model-first ordering
   finalRebounds = finalRebounds.slice(0, 10);
 
-  const nbaModelPickCount = finalRebounds.filter((p) => p.notes === MODEL_NOTES).length;
-  const nbaFallbackPickCount = finalRebounds.filter((p) => p.notes !== MODEL_NOTES).length;
+  const nbaModelPickCount = finalRebounds.filter((p) => p.notes === NBA_REBOUNDS_MODEL_NOTES).length;
+  const nbaFallbackPickCount = finalRebounds.filter((p) => p.notes !== NBA_REBOUNDS_MODEL_NOTES).length;
 
   return {
     topRebounds: finalRebounds,
@@ -1264,7 +1265,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
             if (projMean != null && projMean > 0) {
               ({ fairOver, fairUnder } = fairProbsFromProjection(projMean, over.line));
               confScore = Math.round((statInputsAvailable / statInputs.length) * 100);
-              notesText = "model EV estimate using NBA recent rebounds data";
+              notesText = NBA_REBOUNDS_MODEL_NOTES;
               proj = Math.round(projMean * 100) / 100;
             } else {
               const pOver = over.impliedProb;
@@ -1274,7 +1275,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
               fairOver = pOver / sum;
               fairUnder = pUnder / sum;
               confScore = 10;
-              notesText = "no-vig fallback (NBA stats unavailable)";
+              notesText = NBA_REBOUNDS_FALLBACK_NOTES;
             }
           } catch (err) {
             const pOver = over.impliedProb;
@@ -1284,7 +1285,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
             fairOver = pOver / sum;
             fairUnder = pUnder / sum;
             confScore = 10;
-            notesText = "no-vig fallback (NBA stats unavailable)";
+            notesText = NBA_REBOUNDS_FALLBACK_NOTES;
           }
 
           over.proj = proj;
@@ -1305,7 +1306,12 @@ app.get("/api/top-ev-picks", async (req, res) => {
       const topRebounds = reboundPairs.flat();
 
       const cleanedTopReboundsResult = cleanTopRebounds(topRebounds);
-      const topReboundsWithTracking = cleanedTopReboundsResult.topRebounds.map((pick) => {
+      const returnedTopRebounds = cleanedTopReboundsResult.nbaModelPickCount > 0
+        ? cleanedTopReboundsResult.topRebounds.filter(
+          (pick) => pick.notes === NBA_REBOUNDS_MODEL_NOTES
+        )
+        : [];
+      const topReboundsWithTracking = returnedTopRebounds.map((pick) => {
         const homeTeam = pick._homeTeam || "";
         const awayTeam = pick._awayTeam || "";
         return {
@@ -1314,6 +1320,10 @@ app.get("/api/top-ev-picks", async (req, res) => {
           pickKey: `${pick.player}|${pick.market}|${pick.side}|${pick.line}|${pick.book}`,
         };
       });
+      const topReboundsDebug = {
+        ...cleanedTopReboundsResult.debug,
+        finalReturnedPicks: topReboundsWithTracking.length,
+      };
 
       return res.json({
         topPoints: [],
@@ -1321,9 +1331,10 @@ app.get("/api/top-ev-picks", async (req, res) => {
         topShots: [],
         topShotsDebug: defaultShotsDebug,
         topRebounds: topReboundsWithTracking,
-        topReboundsDebug: cleanedTopReboundsResult.debug,
+        topReboundsDebug,
         nbaModelPickCount: cleanedTopReboundsResult.nbaModelPickCount,
         nbaFallbackPickCount: cleanedTopReboundsResult.nbaFallbackPickCount,
+        nbaStatus: cleanedTopReboundsResult.nbaModelPickCount > 0 ? "model_ready" : "model_unavailable",
         allPicksCount: picks.length,
         requestedSport,
         resolvedSportKey,
