@@ -416,6 +416,187 @@ function fairProbsFromProjection(projMean, line) {
   };
 }
 
+function getCurrentNbaSeason() {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth() + 1;
+  const startYear = month >= 7 ? year : year - 1;
+  const endYear = String(startYear + 1).slice(-2);
+  return `${startYear}-${endYear}`;
+}
+
+function parseNbaMinutes(min) {
+  if (min === null || min === undefined) return null;
+  if (typeof min === "number") return Number.isFinite(min) ? min : null;
+  const str = String(min).trim();
+  if (!str) return null;
+  if (str.includes(":")) {
+    const parts = str.split(":");
+    if (parts.length !== 2) return null;
+    const mins = Number(parts[0]);
+    const secs = Number(parts[1]);
+    if (!Number.isFinite(mins) || !Number.isFinite(secs)) return null;
+    return mins + secs / 60;
+  }
+  const parsed = Number(str);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function nullReboundStats() {
+  return {
+    last10Avg: null,
+    last5Avg: null,
+    seasonAvg: null,
+    minutesAvg: null,
+  };
+}
+
+let _nbaPlayersCache = null;
+let _nbaPlayersCacheTime = 0;
+const NBA_PLAYERS_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function getNbaPlayersMap() {
+  const now = Date.now();
+  if (_nbaPlayersCache && now - _nbaPlayersCacheTime < NBA_PLAYERS_TTL_MS) {
+    return _nbaPlayersCache;
+  }
+
+  const season = getCurrentNbaSeason();
+  const playersUrl = new URL("https://stats.nba.com/stats/commonallplayers");
+  playersUrl.searchParams.set("LeagueID", "00");
+  playersUrl.searchParams.set("Season", season);
+  playersUrl.searchParams.set("IsOnlyCurrentSeason", "1");
+
+  const resp = await fetch(playersUrl.toString(), {
+    headers: {
+      Accept: "application/json, text/plain, */*",
+      Origin: "https://www.nba.com",
+      Referer: "https://www.nba.com/",
+      "User-Agent": "Mozilla/5.0",
+    },
+  });
+
+  if (!resp.ok) return new Map();
+  const data = await resp.json();
+  const resultSets = Array.isArray(data.resultSets) ? data.resultSets : [];
+  const firstSet = resultSets[0];
+  const headers = Array.isArray(firstSet?.headers) ? firstSet.headers : [];
+  const rows = Array.isArray(firstSet?.rowSet) ? firstSet.rowSet : [];
+  if (headers.length === 0 || rows.length === 0) return new Map();
+
+  const nameIndex = headers.indexOf("DISPLAY_FIRST_LAST");
+  const idIndex = headers.indexOf("PERSON_ID");
+  if (nameIndex < 0 || idIndex < 0) return new Map();
+
+  const map = new Map();
+  for (const row of rows) {
+    const name = String(row[nameIndex] ?? "").trim().toLowerCase();
+    const id = row[idIndex];
+    if (!name || !id) continue;
+    map.set(name, id);
+  }
+
+  _nbaPlayersCache = map;
+  _nbaPlayersCacheTime = now;
+  return map;
+}
+
+async function getPlayerReboundStats(playerName, homeTeam, awayTeam) {
+  try {
+    const playersMap = await getNbaPlayersMap();
+    const normalizedName = String(playerName || "").trim().toLowerCase();
+    if (!normalizedName) return nullReboundStats();
+
+    const playerId = playersMap.get(normalizedName);
+    if (!playerId) return nullReboundStats();
+
+    const season = getCurrentNbaSeason();
+    const gameLogUrl = new URL("https://stats.nba.com/stats/playergamelog");
+    gameLogUrl.searchParams.set("PlayerID", String(playerId));
+    gameLogUrl.searchParams.set("Season", season);
+    gameLogUrl.searchParams.set("SeasonType", "Regular Season");
+
+    const gameLogResp = await fetch(gameLogUrl.toString(), {
+      headers: {
+        Accept: "application/json, text/plain, */*",
+        Origin: "https://www.nba.com",
+        Referer: "https://www.nba.com/",
+        "User-Agent": "Mozilla/5.0",
+      },
+    });
+    if (!gameLogResp.ok) return nullReboundStats();
+
+    const gameLogData = await gameLogResp.json();
+    const resultSets = Array.isArray(gameLogData.resultSets) ? gameLogData.resultSets : [];
+    const firstSet = resultSets[0];
+    const headers = Array.isArray(firstSet?.headers) ? firstSet.headers : [];
+    const rows = Array.isArray(firstSet?.rowSet) ? firstSet.rowSet : [];
+    if (headers.length === 0 || rows.length === 0) return nullReboundStats();
+
+    const rebIndex = headers.indexOf("REB");
+    const minIndex = headers.indexOf("MIN");
+    if (rebIndex < 0) return nullReboundStats();
+
+    const statRows = rows
+      .map((row) => ({
+        reb: Number(row[rebIndex]),
+        min: minIndex >= 0 ? parseNbaMinutes(row[minIndex]) : null,
+      }))
+      .filter((row) => Number.isFinite(row.reb));
+
+    if (statRows.length === 0) return nullReboundStats();
+
+    const recent10 = statRows.slice(0, Math.min(10, statRows.length));
+    const recent5 = statRows.slice(0, Math.min(5, statRows.length));
+    const avg = (arr, field) => arr.reduce((sum, item) => sum + Number(item[field] ?? 0), 0) / arr.length;
+
+    const last10Avg = recent10.length >= 3 ? avg(recent10, "reb") : null;
+    const last5Avg = recent5.length >= 3 ? avg(recent5, "reb") : null;
+    const seasonAvg = statRows.length >= 1 ? avg(statRows, "reb") : null;
+
+    const minuteSamples = recent10
+      .map((row) => row.min)
+      .filter((value) => value != null && Number.isFinite(value));
+    const minutesAvg = minuteSamples.length
+      ? minuteSamples.reduce((sum, value) => sum + value, 0) / minuteSamples.length
+      : null;
+
+    return {
+      last10Avg,
+      last5Avg,
+      seasonAvg,
+      minutesAvg,
+      homeTeam,
+      awayTeam,
+    };
+  } catch (err) {
+    console.error(`[Rebounds stats] NBA API error for "${playerName}":`, err.message);
+    return nullReboundStats();
+  }
+}
+
+function computeProjectedRebounds(stats) {
+  const windows = [
+    { val: stats.last10Avg, wt: 40 },
+    { val: stats.last5Avg, wt: 30 },
+    { val: stats.seasonAvg, wt: 20 },
+  ];
+  const available = windows.filter((window) => window.val != null);
+  if (available.length === 0) return null;
+
+  const totalWeight = available.reduce((sum, window) => sum + window.wt, 0);
+  const baseProjection = available.reduce((sum, window) => sum + window.val * window.wt, 0) / totalWeight;
+
+  let minutesAdjusted = baseProjection;
+  if (stats.minutesAvg != null) {
+    const MIN_BASELINE = 30;
+    const minuteScalar = Math.min(Math.max(stats.minutesAvg / MIN_BASELINE, 0.75), 1.25);
+    minutesAdjusted = baseProjection * minuteScalar;
+  }
+
+  return (baseProjection * 90 + minutesAdjusted * 10) / 100;
+}
+
 /**
  * Compute a weighted projected SOG mean.
  * Weights: 35% L10 avg | 25% L5 avg | 20% season avg |
@@ -497,6 +678,13 @@ function hasProjectionBuffer(pick) {
   return false;
 }
 
+function hasReboundProjectionBuffer(pick) {
+  if (!Number.isFinite(pick.proj) || !Number.isFinite(pick.line)) return false;
+  if (pick.side === "Under") return pick.proj <= pick.line - 0.3;
+  if (pick.side === "Over") return pick.proj >= pick.line + 0.3;
+  return false;
+}
+
 function isBetterSportsbookPrice(candidateOdds, currentOdds) {
   return Number(candidateOdds) > Number(currentOdds);
 }
@@ -558,30 +746,292 @@ function cleanTopShots(topShots) {
   };
 }
 
+function cleanTopRebounds(topRebounds) {
+  const totalRawPicks = topRebounds.length;
+  const dedupedRebounds = new Map();
+  for (const pick of topRebounds) {
+    const dedupeKey = `${pick.player}|${pick.side}|${pick.line}`;
+    const existingPick = dedupedRebounds.get(dedupeKey);
+    const shouldReplace =
+      !existingPick
+      || isBetterSportsbookPrice(pick.odds, existingPick.odds)
+      || (Number(pick.odds) === Number(existingPick.odds) && Number(pick.ev) > Number(existingPick.ev));
+    if (shouldReplace) dedupedRebounds.set(dedupeKey, pick);
+  }
+
+  const afterDedupe = Array.from(dedupedRebounds.values());
+  const afterConfidence = afterDedupe.filter((pick) => {
+    if (pick.notes === "model EV estimate using NBA recent rebounds data") {
+      return pick.confidence >= 55;
+    }
+    return true;
+  });
+  const afterEV = afterConfidence.filter((pick) => pick.ev >= 0.02);
+  const afterProjectionBuffer = afterEV.filter((pick) => hasReboundProjectionBuffer(pick));
+  const sortedByEv = afterProjectionBuffer.sort((a, b) => b.ev - a.ev);
+
+  const gameCounts = new Map();
+  const gameCapped = [];
+  for (const pick of sortedByEv) {
+    const gameKey = getGameKey(pick);
+    const count = gameCounts.get(gameKey) ?? 0;
+    if (count >= 2) continue;
+    gameCapped.push(pick);
+    gameCounts.set(gameKey, count + 1);
+  }
+
+  let finalRebounds = [...gameCapped];
+  if (finalRebounds.length < 5) {
+    const selectedKeys = new Set(
+      finalRebounds.map((pick) => `${pick.player}|${pick.market}|${pick.side}|${pick.line}|${pick.book}`)
+    );
+    for (const pick of sortedByEv) {
+      const key = `${pick.player}|${pick.market}|${pick.side}|${pick.line}|${pick.book}`;
+      if (selectedKeys.has(key)) continue;
+      finalRebounds.push(pick);
+      selectedKeys.add(key);
+      if (finalRebounds.length >= 5) break;
+    }
+  }
+
+  finalRebounds = finalRebounds.sort((a, b) => b.ev - a.ev).slice(0, 10);
+
+  return {
+    topRebounds: finalRebounds,
+    debug: {
+      totalRawReboundPicks: totalRawPicks,
+      afterDedupe: afterDedupe.length,
+      afterConfidenceFilter: afterConfidence.length,
+      afterEVFilter: afterEV.length,
+      afterProjectionBuffer: afterProjectionBuffer.length,
+      afterGameCap: gameCapped.length,
+      finalReturnedPicks: finalRebounds.length,
+    },
+  };
+}
+
 app.get("/api/top-ev-picks", async (req, res) => {
   const apiKey = process.env.ODDS_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ error: "ODDS_API_KEY is not set in process.env" });
   }
 
-  const sport = "icehockey_nhl";
+  const sportMap = {
+    NHL: "icehockey_nhl",
+    NBA: "basketball_nba",
+  };
+  const requestedSport = String(req.query.sport || "NHL").toUpperCase();
+  const resolvedSportKey = sportMap[requestedSport] || sportMap.NHL;
   const book = req.query.book ? String(req.query.book) : undefined;
 
-  const eventListUrl = new URL(`https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sport)}/odds`);
-  eventListUrl.searchParams.set("apiKey", apiKey);
-  eventListUrl.searchParams.set("regions", "us");
-  eventListUrl.searchParams.set("markets", "h2h");
-  eventListUrl.searchParams.set("oddsFormat", "american");
-  eventListUrl.searchParams.set("dateFormat", "iso");
-  if (book) eventListUrl.searchParams.set("bookmakers", book);
-
   try {
+    const defaultShotsDebug = {
+      totalRawSOGPicks: 0,
+      afterDedupe: 0,
+      afterConfidenceFilter: 0,
+      afterEVFilter: 0,
+      afterProjectionBuffer: 0,
+      finalReturnedPicks: 0,
+    };
+    const defaultReboundsDebug = {
+      totalRawReboundPicks: 0,
+      afterDedupe: 0,
+      afterConfidenceFilter: 0,
+      afterEVFilter: 0,
+      afterProjectionBuffer: 0,
+      afterGameCap: 0,
+      finalReturnedPicks: 0,
+    };
+
+    if (resolvedSportKey === sportMap.NBA) {
+      const eventListUrl = new URL(`https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sportMap.NBA)}/odds`);
+      eventListUrl.searchParams.set("apiKey", apiKey);
+      eventListUrl.searchParams.set("regions", "us");
+      eventListUrl.searchParams.set("markets", "h2h");
+      eventListUrl.searchParams.set("oddsFormat", "american");
+      eventListUrl.searchParams.set("dateFormat", "iso");
+      if (book) eventListUrl.searchParams.set("bookmakers", book);
+
+      const listResponse = await fetch(eventListUrl.toString());
+      if (!listResponse.ok) {
+        const text = await listResponse.text();
+        return res.status(listResponse.status).json({
+          error: "failed fetching event list",
+          details: text,
+          requestedSport,
+          resolvedSportKey,
+        });
+      }
+
+      const listData = await listResponse.json();
+      const eventIds = Array.isArray(listData)
+        ? listData.map((event) => event.id ?? event.event_id).filter(Boolean)
+        : [];
+      const eventListCount = eventIds.length;
+      let rawBookmakerCount = 0;
+
+      const picks = [];
+      await Promise.all(
+        eventIds.map(async (eventId, idx) => {
+          const oddsUrl = new URL(
+            `https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sportMap.NBA)}/events/${encodeURIComponent(eventId)}/odds`
+          );
+          oddsUrl.searchParams.set("apiKey", apiKey);
+          oddsUrl.searchParams.set("regions", "us");
+          oddsUrl.searchParams.set("markets", "player_rebounds");
+          oddsUrl.searchParams.set("oddsFormat", "american");
+          oddsUrl.searchParams.set("dateFormat", "iso");
+          if (book) oddsUrl.searchParams.set("bookmakers", book);
+
+          const oddsResponse = await fetch(oddsUrl.toString());
+          if (!oddsResponse.ok) return;
+
+          const oddsData = await oddsResponse.json();
+          const bookmakers = Array.isArray(oddsData.bookmakers) ? oddsData.bookmakers : [];
+          if (idx === 0) rawBookmakerCount = bookmakers.length;
+
+          for (const bookmaker of bookmakers) {
+            if (book && bookmaker.key !== book) continue;
+            const bookName = bookmaker.title || bookmaker.key || "";
+            const marketsList = Array.isArray(bookmaker.markets) ? bookmaker.markets : [];
+
+            for (const m of marketsList) {
+              if (m.key !== "player_rebounds") continue;
+              const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
+
+              for (const outcome of outcomes) {
+                const oddsValue = outcome.price ?? 0;
+                const impliedProb = americanToImpliedProbability(oddsValue) ?? 0;
+                const pick = normalizePick({
+                  player: outcome.description || "",
+                  team: "",
+                  opp: "",
+                  market: "Rebounds",
+                  line: outcome.point ?? 0,
+                  side: outcome.name || "",
+                  book: bookName,
+                  odds: oddsValue,
+                  proj: 0,
+                  fairProb: impliedProb,
+                  impliedProb,
+                  ev: 0,
+                  confidence: 0,
+                  notes: "live prop odds - projection pending",
+                });
+                pick._homeTeam = oddsData.home_team || "";
+                pick._awayTeam = oddsData.away_team || "";
+                picks.push(pick);
+              }
+            }
+          }
+        })
+      );
+
+      const reboundGroups = {};
+      const reboundsRaw = picks.filter((pick) => pick.market === "Rebounds");
+      for (const pick of reboundsRaw) {
+        const key = `${pick.player}|${pick.market}|${pick.line}|${pick.book}`;
+        if (!reboundGroups[key]) reboundGroups[key] = {};
+        reboundGroups[key][pick.side] = pick;
+      }
+
+      const topRebounds = [];
+      for (const key of Object.keys(reboundGroups)) {
+        const group = reboundGroups[key];
+        const over = group.Over;
+        const under = group.Under;
+        if (!over || !under) continue;
+
+        const stats = await getPlayerReboundStats(
+          over.player,
+          over._homeTeam || "",
+          over._awayTeam || ""
+        );
+        const projMean = computeProjectedRebounds(stats);
+
+        let fairOver;
+        let fairUnder;
+        let notesText;
+        let confScore;
+
+        const statInputs = [stats.last10Avg, stats.last5Avg, stats.seasonAvg, stats.minutesAvg];
+        const statInputsAvailable = statInputs.filter((value) => value != null).length;
+
+        if (projMean != null && projMean > 0) {
+          ({ fairOver, fairUnder } = fairProbsFromProjection(projMean, over.line));
+          confScore = Math.round((statInputsAvailable / statInputs.length) * 100);
+          notesText = "model EV estimate using NBA recent rebounds data";
+        } else {
+          const pOver = over.impliedProb;
+          const pUnder = under.impliedProb;
+          const sum = pOver + pUnder;
+          if (sum === 0) continue;
+          fairOver = pOver / sum;
+          fairUnder = pUnder / sum;
+          confScore = 10;
+          notesText = "no-vig fallback (NBA rebounds stats unavailable)";
+        }
+
+        const proj = projMean != null ? Math.round(projMean * 100) / 100 : 0;
+
+        over.proj = proj;
+        over.fairProb = Math.round(fairOver * 10000) / 10000;
+        over.ev = Math.round((fairOver * americanPayout(over.odds) - (1 - fairOver)) * 10000) / 10000;
+        over.confidence = confScore;
+        over.notes = notesText;
+
+        under.proj = proj;
+        under.fairProb = Math.round(fairUnder * 10000) / 10000;
+        under.ev = Math.round((fairUnder * americanPayout(under.odds) - (1 - fairUnder)) * 10000) / 10000;
+        under.confidence = confScore;
+        under.notes = notesText;
+
+        topRebounds.push(over, under);
+      }
+
+      const cleanedTopReboundsResult = cleanTopRebounds(topRebounds);
+      const topReboundsWithTracking = cleanedTopReboundsResult.topRebounds.map((pick) => {
+        const homeTeam = pick._homeTeam || "";
+        const awayTeam = pick._awayTeam || "";
+        return {
+          ...pick,
+          gameKey: `${homeTeam} vs ${awayTeam}`,
+          pickKey: `${pick.player}|${pick.market}|${pick.side}|${pick.line}|${pick.book}`,
+        };
+      });
+
+      return res.json({
+        topPoints: [],
+        topAssists: [],
+        topShots: [],
+        topShotsDebug: defaultShotsDebug,
+        topRebounds: topReboundsWithTracking,
+        topReboundsDebug: cleanedTopReboundsResult.debug,
+        allPicksCount: picks.length,
+        requestedSport,
+        resolvedSportKey,
+        eventListCount,
+        rawBookmakerCount,
+      });
+    }
+
+    // NHL explicit flow (default)
+    const eventListUrl = new URL(`https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sportMap.NHL)}/odds`);
+    eventListUrl.searchParams.set("apiKey", apiKey);
+    eventListUrl.searchParams.set("regions", "us");
+    eventListUrl.searchParams.set("markets", "h2h");
+    eventListUrl.searchParams.set("oddsFormat", "american");
+    eventListUrl.searchParams.set("dateFormat", "iso");
+    if (book) eventListUrl.searchParams.set("bookmakers", book);
+
     const listResponse = await fetch(eventListUrl.toString());
     if (!listResponse.ok) {
       const text = await listResponse.text();
       return res.status(listResponse.status).json({
         error: "failed fetching event list",
         details: text,
+        requestedSport,
+        resolvedSportKey,
       });
     }
 
@@ -589,35 +1039,28 @@ app.get("/api/top-ev-picks", async (req, res) => {
     const eventIds = Array.isArray(listData)
       ? listData.map((event) => event.id ?? event.event_id).filter(Boolean)
       : [];
-
-    const markets = ["player_points", "player_assists", "player_shots_on_goal"];
-    const marketMap = {
-      player_points: "Points",
-      player_assists: "Assists",
-      player_shots_on_goal: "Shots on Goal",
-    };
+    const eventListCount = eventIds.length;
+    let rawBookmakerCount = 0;
 
     const picks = [];
-
     await Promise.all(
-      eventIds.map(async (eventId) => {
+      eventIds.map(async (eventId, idx) => {
         const oddsUrl = new URL(
-          `https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sport)}/events/${encodeURIComponent(eventId)}/odds`
+          `https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sportMap.NHL)}/events/${encodeURIComponent(eventId)}/odds`
         );
         oddsUrl.searchParams.set("apiKey", apiKey);
         oddsUrl.searchParams.set("regions", "us");
-        oddsUrl.searchParams.set("markets", markets.join(","));
+        oddsUrl.searchParams.set("markets", "player_points,player_assists,player_shots_on_goal");
         oddsUrl.searchParams.set("oddsFormat", "american");
         oddsUrl.searchParams.set("dateFormat", "iso");
         if (book) oddsUrl.searchParams.set("bookmakers", book);
 
         const oddsResponse = await fetch(oddsUrl.toString());
-        if (!oddsResponse.ok) {
-          return;
-        }
+        if (!oddsResponse.ok) return;
 
         const oddsData = await oddsResponse.json();
         const bookmakers = Array.isArray(oddsData.bookmakers) ? oddsData.bookmakers : [];
+        if (idx === 0) rawBookmakerCount = bookmakers.length;
 
         for (const bookmaker of bookmakers) {
           if (book && bookmaker.key !== book) continue;
@@ -626,19 +1069,22 @@ app.get("/api/top-ev-picks", async (req, res) => {
           const marketsList = Array.isArray(bookmaker.markets) ? bookmaker.markets : [];
 
           for (const m of marketsList) {
-            if (!markets.includes(m.key)) continue;
-
+            if (!["player_points", "player_assists", "player_shots_on_goal"].includes(m.key)) continue;
             const outcomes = Array.isArray(m.outcomes) ? m.outcomes : [];
 
             for (const outcome of outcomes) {
               const oddsValue = outcome.price ?? 0;
               const impliedProb = americanToImpliedProbability(oddsValue) ?? 0;
+              const marketLabel =
+                m.key === "player_points" ? "Points"
+                : m.key === "player_assists" ? "Assists"
+                : "Shots on Goal";
 
               const pick = normalizePick({
                 player: outcome.description || "",
                 team: "",
                 opp: "",
-                market: marketMap[m.key] || m.key,
+                market: marketLabel,
                 line: outcome.point ?? 0,
                 side: outcome.name || "",
                 book: bookName,
@@ -650,10 +1096,8 @@ app.get("/api/top-ev-picks", async (req, res) => {
                 confidence: 0,
                 notes: "live prop odds - projection pending",
               });
-              // Store event context for team/opponent environment lookup
               pick._homeTeam = oddsData.home_team || "";
               pick._awayTeam = oddsData.away_team || "";
-
               picks.push(pick);
             }
           }
@@ -661,10 +1105,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
       })
     );
 
-    // --- Shots on Goal: model-based EV ---
     const shotsRaw = picks.filter((p) => p.market === "Shots on Goal");
-
-    // Pair Over and Under by player + line + book
     const shotsGroups = {};
     for (const pick of shotsRaw) {
       const key = `${pick.player}|${pick.line}|${pick.book}`;
@@ -672,31 +1113,28 @@ app.get("/api/top-ev-picks", async (req, res) => {
       shotsGroups[key][pick.side] = pick;
     }
 
-    // Fetch standings once for the whole SOG loop (cached; one NHL API call)
     const standingsMap = await getTeamStandingsMap();
-
     const topShots = [];
+
     for (const key of Object.keys(shotsGroups)) {
       const group = shotsGroups[key];
-      const over = group["Over"];
-      const under = group["Under"];
-      if (!over || !under) continue; // both sides required
+      const over = group.Over;
+      const under = group.Under;
+      if (!over || !under) continue;
 
-      const playerName = over.player;
-      const line = over.line;
-
-      // Fetch real player stats + team/opp environment from NHL API
       const stats = await getPlayerSOGStats(
-        playerName,
+        over.player,
         over._homeTeam || "",
         over._awayTeam || "",
         standingsMap
       );
       const projMean = computeProjectedSOG(stats);
 
-      let fairOver, fairUnder, notesText, confScore;
+      let fairOver;
+      let fairUnder;
+      let notesText;
+      let confScore;
 
-      // 7-field confidence: rolling windows + TOI + PPTOI + team env + opp env
       const statFields = [
         stats.last10Avg,
         stats.last5Avg,
@@ -709,19 +1147,17 @@ app.get("/api/top-ev-picks", async (req, res) => {
       const dataPointsAvailable = statFields.filter((v) => v != null).length;
 
       if (projMean != null && projMean > 0) {
-        // --- Model-based path: Poisson fair probabilities from projection ---
-        ({ fairOver, fairUnder } = fairProbsFromProjection(projMean, line));
+        ({ fairOver, fairUnder } = fairProbsFromProjection(projMean, over.line));
         confScore = Math.round((dataPointsAvailable / statFields.length) * 100);
         notesText = "model EV estimate using NHL recent SOG data";
       } else {
-        // --- Fallback: no-vig removal when no player stats are available ---
         const pOver = over.impliedProb;
         const pUnder = under.impliedProb;
         const sum = pOver + pUnder;
         if (sum === 0) continue;
         fairOver = pOver / sum;
         fairUnder = pUnder / sum;
-        confScore = 10; // low confidence – no stat data
+        confScore = 10;
         notesText = "no-vig fallback (player stats not yet available)";
       }
 
@@ -744,12 +1180,10 @@ app.get("/api/top-ev-picks", async (req, res) => {
 
     const cleanedTopShotsResult = cleanTopShots(topShots);
 
-    // Placeholder logic for Points/Assists
     const topPoints = picks
       .filter((p) => p.market === "Points")
       .sort((a, b) => b.impliedProb - a.impliedProb)
       .slice(0, 10);
-
     const topAssists = picks
       .filter((p) => p.market === "Assists")
       .sort((a, b) => b.impliedProb - a.impliedProb)
@@ -770,7 +1204,13 @@ app.get("/api/top-ev-picks", async (req, res) => {
       topAssists,
       topShots: topShotsWithTracking,
       topShotsDebug: cleanedTopShotsResult.debug,
+      topRebounds: [],
+      topReboundsDebug: defaultReboundsDebug,
       allPicksCount: picks.length,
+      requestedSport,
+      resolvedSportKey,
+      eventListCount,
+      rawBookmakerCount,
     });
   } catch (error) {
     return res.status(500).json({
