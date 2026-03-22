@@ -91,6 +91,10 @@
         padding: 16px;
         margin-bottom: 18px;
       }
+      .section-title {
+        margin: 0 0 12px;
+        font-size: 20px;
+      }
       .error {
         color: #fca5a5;
       }
@@ -255,6 +259,7 @@
       <div id="topPointsSection"></div>
       <div id="topAssistsSection"></div>
       <div id="topShotsSection"></div>
+      <div id="topReboundsSection"></div>
     </div>
 
     <script>
@@ -267,6 +272,7 @@
     pointsSection: document.getElementById("topPointsSection"),
     assistsSection: document.getElementById("topAssistsSection"),
     shotsSection: document.getElementById("topShotsSection"),
+    reboundsSection: document.getElementById("topReboundsSection"),
     allPicksCount: document.getElementById("allPicksCount")
   };
 
@@ -304,23 +310,22 @@
   function renderCard(pick) {
     const market = pick.market || "";
     const isShots = String(market).toLowerCase() === "shots on goal";
+    const isRebounds = String(market).toLowerCase() === "rebounds";
     const evVal = evNumber(pick.ev);
     const evText = asPercentDisplay(pick.ev);
     const fairProbText = asPercentDisplay(pick.fairProb);
     const evClass = evVal > 0 ? "ev-positive" : evVal < 0 ? "ev-negative" : "ev-neutral";
 
-    // Badge: only for Shots on Goal cards
+    // Badge for model/fallback picks
     let badgeHtml = "";
-    if (isShots) {
-      const notes = String(pick.notes || "");
-      if (notes.includes("model EV estimate using NHL recent SOG data")) {
-        badgeHtml = `<span class="badge-model">Model Pick</span>`;
-      } else if (notes.includes("no-vig fallback")) {
-        badgeHtml = `<span class="badge-fallback">Fallback</span>`;
-      }
+    const notes = String(pick.notes || "").toLowerCase();
+    if (notes.includes("model ev estimate")) {
+      badgeHtml = `<span class="badge-model">Model Pick</span>`;
+    } else if (notes.includes("fallback")) {
+      badgeHtml = `<span class="badge-fallback">Fallback</span>`;
     }
 
-    const prominent = isShots
+    const prominent = (isShots || isRebounds)
       ? `
         <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           ${badgeHtml}
@@ -330,11 +335,11 @@
       `
       : "";
 
-    // Extra rows shown only for Shots on Goal
-    const shotExtraRows = isShots ? `
-          <div class="pick-row"><span class="pick-label">Proj SOG</span><span class="pick-value">${pick.proj != null && pick.proj !== 0 ? Number(pick.proj).toFixed(2) : "—"}</span></div>
+        // Extra rows shown for model markets
+        const modelExtraRows = (isShots || isRebounds) ? `
+          <div class="pick-row"><span class="pick-label">Proj</span><span class="pick-value">${pick.proj != null && pick.proj !== 0 ? Number(pick.proj).toFixed(2) : "—"}</span></div>
           <div class="pick-row"><span class="pick-label">Confidence</span><span class="pick-value">${pick.confidence != null ? pick.confidence + "%" : "—"}</span></div>
-    ` : "";
+        ` : "";
 
     return `
       <div class="pick-card">
@@ -353,53 +358,75 @@
           <div class="pick-row"><span class="pick-label">Implied Prob</span><span class="pick-value">${asPercentDisplay(pick.impliedProb)}</span></div>
           <div class="pick-row"><span class="pick-label">Fair Prob</span><span class="pick-value">${fairProbText}</span></div>
           <div class="pick-row"><span class="pick-label">EV</span><span class="pick-value ${evClass}">${evText}</span></div>
-          ${shotExtraRows}
+          ${modelExtraRows}
         </div>
         <div class="pick-notes"><strong>Notes:</strong> ${asDisplay(pick.notes)}</div>
       </div>
     `;
   }
 
-  function renderSection(element, items) {
+  function renderSection(element, title, items) {
     if (!element) return;
     if (!items || !items.length) {
-      element.innerHTML = `<div class="pick-card">No live props found.</div>`;
+      element.innerHTML = `
+        <div class="card">
+          <h2 class="section-title">${title}</h2>
+          <div class="pick-card">No live props found.</div>
+        </div>
+      `;
       return;
     }
-    element.innerHTML = items.map(renderCard).join("");
+    element.innerHTML = `
+      <div class="card">
+        <h2 class="section-title">${title}</h2>
+        ${items.map(renderCard).join("")}
+      </div>
+    `;
   }
 
   async function loadLiveProps() {
     try {
-      els.statusText.textContent = "Loading live NHL props...";
+      els.statusText.textContent = "Loading live NHL and NBA props...";
 
-      const response = await fetch(`${BACKEND_URL}/api/top-ev-picks?sport=NHL`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      const [nhlResponse, nbaResponse] = await Promise.all([
+        fetch(`${BACKEND_URL}/api/top-ev-picks?sport=NHL`),
+        fetch(`${BACKEND_URL}/api/top-ev-picks?sport=NBA`),
+      ]);
+
+      if (!nhlResponse.ok) {
+        throw new Error(`NHL HTTP ${nhlResponse.status}`);
+      }
+      if (!nbaResponse.ok) {
+        throw new Error(`NBA HTTP ${nbaResponse.status}`);
       }
 
-      const data = await response.json();
-      console.log("LIVE DATA", data);
+      const nhlData = await nhlResponse.json();
+      const data = await nbaResponse.json();
+      console.log("LIVE NHL DATA", nhlData);
+      console.log("LIVE NBA DATA", data);
 
-      const topPoints = data.topPoints || [];
-      const topAssists = data.topAssists || [];
-      const topShots = data.topShots || [];
-      const allPicksCount = data.allPicksCount || 0;
+      const topPoints = nhlData.topPoints || [];
+      const topAssists = nhlData.topAssists || [];
+      const topShots = nhlData.topShots || [];
+      const topRebounds = data.topRebounds || [];
+      const allPicksCount = (nhlData.allPicksCount || 0) + (data.allPicksCount || 0);
 
-      renderSection(els.pointsSection, topPoints);
-      renderSection(els.assistsSection, topAssists);
-      renderSection(els.shotsSection, topShots);
+      renderSection(els.pointsSection, "Top 10 Points", topPoints);
+      renderSection(els.assistsSection, "Top 10 Assists", topAssists);
+      renderSection(els.shotsSection, "Top 10 Shots on Goal EV", topShots);
+      renderSection(els.reboundsSection, "Top 10 NBA Rebounds EV", topRebounds);
 
       if (els.allPicksCount) {
         els.allPicksCount.textContent = `All picks: ${allPicksCount}`;
       }
 
-      els.statusText.textContent = "Loaded live NHL props successfully.";
+      els.statusText.textContent = "Loaded live NHL and NBA props successfully.";
     } catch (error) {
       const errorStatus = error?.message || "Unknown error";
-      renderSection(els.pointsSection, []);
-      renderSection(els.assistsSection, []);
-      renderSection(els.shotsSection, []);
+      renderSection(els.pointsSection, "Top 10 Points", []);
+      renderSection(els.assistsSection, "Top 10 Assists", []);
+      renderSection(els.shotsSection, "Top 10 Shots on Goal EV", []);
+      renderSection(els.reboundsSection, "Top 10 NBA Rebounds EV", []);
       els.statusText.textContent = `No live props found. Error status: ${errorStatus}`;
       console.error(error);
     }
@@ -414,6 +441,7 @@
       if (els.pointsSection) els.pointsSection.innerHTML = "";
       if (els.assistsSection) els.assistsSection.innerHTML = "";
       if (els.shotsSection) els.shotsSection.innerHTML = "";
+      if (els.reboundsSection) els.reboundsSection.innerHTML = "";
       if (els.allPicksCount) els.allPicksCount.textContent = "All picks: 0";
       els.statusText.textContent = "Ready to load live data.";
     });
