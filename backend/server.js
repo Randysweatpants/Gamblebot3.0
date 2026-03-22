@@ -460,12 +460,12 @@ function nullReboundStats() {
 
 const BALLDONTLIE_BASE = "https://api.balldontlie.io/v1";
 const NBA_STATS_TIMEOUT_MS = 8000;
-const BDL_STATS_TTL_MS = 60 * 60 * 1000; // 1 hour per-player stats cache
+const BDL_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
-// Persists for server lifetime (player IDs don't change)
+// normalizedName -> { playerId: number|null, ts: number }
 const _bdlPlayerIdCache = new Map();
-// Per-player stats cache with TTL
-const _bdlStatsCache = new Map(); // normalizedName -> { stats, ts }
+// playerId -> { stats: {last10Avg,last5Avg,seasonAvg,minutesAvg}, ts: number }
+const _bdlStatsCache = new Map();
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = NBA_STATS_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -529,10 +529,17 @@ async function getBdlPlayerId(playerName, apiKey, statsDebug) {
   const normalizedOddsName = normalizePlayerName(playerName);
   if (!normalizedOddsName) return null;
 
-  if (_bdlPlayerIdCache.has(normalizedOddsName)) {
-    incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
-    return _bdlPlayerIdCache.get(normalizedOddsName);
+  const cachedPlayer = _bdlPlayerIdCache.get(normalizedOddsName);
+  if (cachedPlayer && Date.now() - cachedPlayer.ts < BDL_CACHE_TTL_MS) {
+    incrementNbaStatsCounter(statsDebug, "nbaPlayerCacheHitCount");
+    if (cachedPlayer.playerId) {
+      incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
+    } else {
+      incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
+    }
+    return cachedPlayer.playerId;
   }
+  incrementNbaStatsCounter(statsDebug, "nbaPlayerCacheMissCount");
 
   try {
     // Split the full name into first and last name
@@ -576,7 +583,10 @@ async function getBdlPlayerId(playerName, apiKey, statsDebug) {
         return bdlFullName === normalizedOddsName;
       });
       if (matchedPlayer && matchedPlayer.id) {
-        _bdlPlayerIdCache.set(normalizedOddsName, matchedPlayer.id);
+        _bdlPlayerIdCache.set(normalizedOddsName, {
+          playerId: matchedPlayer.id,
+          ts: Date.now(),
+        });
         incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
         return matchedPlayer.id;
       }
@@ -614,12 +624,19 @@ async function getBdlPlayerId(playerName, apiKey, statsDebug) {
       return bdlFullName === normalizedOddsName;
     });
     if (matchedPlayer && matchedPlayer.id) {
-      _bdlPlayerIdCache.set(normalizedOddsName, matchedPlayer.id);
+      _bdlPlayerIdCache.set(normalizedOddsName, {
+        playerId: matchedPlayer.id,
+        ts: Date.now(),
+      });
       incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
       return matchedPlayer.id;
     }
 
     // No exact match found from either search
+    _bdlPlayerIdCache.set(normalizedOddsName, {
+      playerId: null,
+      ts: Date.now(),
+    });
     incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
     return null;
   } catch (err) {
@@ -634,7 +651,7 @@ async function getBdlPlayerId(playerName, apiKey, statsDebug) {
 
 /**
  * Fetch per-player rebound stats for the current NBA season using balldontlie.
- * Results are cached for BDL_STATS_TTL_MS to avoid duplicate API calls
+ * Results are cached for BDL_CACHE_TTL_MS to avoid duplicate API calls
  * across multiple line/book groups for the same player.
  */
 async function getPlayerReboundStats(playerName, homeTeam, awayTeam, statsDebug) {
@@ -646,24 +663,24 @@ async function getPlayerReboundStats(playerName, homeTeam, awayTeam, statsDebug)
     return nullReboundStats();
   }
 
-  const normalizedName = String(playerName || "").trim().toLowerCase();
-
-  // Return cached stats if still fresh
-  const cached = _bdlStatsCache.get(normalizedName);
-  if (cached && Date.now() - cached.ts < BDL_STATS_TTL_MS) {
-    // Count as success since we already have usable stats
-    if (hasUsableReboundStats(cached.stats)) {
-      incrementNbaStatsCounter(statsDebug, "nbaStatsSuccessCount");
-    }
-    return { ...cached.stats, homeTeam, awayTeam };
-  }
-
   try {
     const playerId = await getBdlPlayerId(playerName, apiKey, statsDebug);
     if (!playerId) {
       incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
       return nullReboundStats();
     }
+
+    // Return cached stats by balldontlie player ID if still fresh
+    const cached = _bdlStatsCache.get(playerId);
+    if (cached && Date.now() - cached.ts < BDL_CACHE_TTL_MS) {
+      incrementNbaStatsCounter(statsDebug, "nbaStatsCacheHitCount");
+      // Count as success since we already have usable stats
+      if (hasUsableReboundStats(cached.stats)) {
+        incrementNbaStatsCounter(statsDebug, "nbaStatsSuccessCount");
+      }
+      return { ...cached.stats, homeTeam, awayTeam };
+    }
+    incrementNbaStatsCounter(statsDebug, "nbaStatsCacheMissCount");
 
     const seasonYear = getCurrentNbaSeasonYear();
     const statsUrl = new URL(`${BALLDONTLIE_BASE}/stats`);
@@ -725,7 +742,7 @@ async function getPlayerReboundStats(playerName, homeTeam, awayTeam, statsDebug)
       : null;
 
     const coreStats = { last10Avg, last5Avg, seasonAvg, minutesAvg };
-    _bdlStatsCache.set(normalizedName, { stats: coreStats, ts: Date.now() });
+    _bdlStatsCache.set(playerId, { stats: coreStats, ts: Date.now() });
 
     const stats = { ...coreStats, homeTeam, awayTeam };
     if (hasUsableReboundStats(stats)) {
@@ -1073,6 +1090,10 @@ app.get("/api/top-ev-picks", async (req, res) => {
         nbaPlayersProcessedCount: 0,
         nbaPlayerMatchSuccessCount: 0,
         nbaPlayerMatchFailureCount: 0,
+        nbaPlayerCacheHitCount: 0,
+        nbaPlayerCacheMissCount: 0,
+        nbaStatsCacheHitCount: 0,
+        nbaStatsCacheMissCount: 0,
       };
       const nbaReboundMarketCandidates = ["player_rebounds", "player_rebounds_alternate"];
       const eventListUrl = new URL(`https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sportMap.NBA)}/odds`);
@@ -1355,6 +1376,10 @@ app.get("/api/top-ev-picks", async (req, res) => {
         nbaPlayersProcessedCount: nbaStatsDebug.nbaPlayersProcessedCount,
         nbaPlayerMatchSuccessCount: nbaStatsDebug.nbaPlayerMatchSuccessCount,
         nbaPlayerMatchFailureCount: nbaStatsDebug.nbaPlayerMatchFailureCount,
+        nbaPlayerCacheHitCount: nbaStatsDebug.nbaPlayerCacheHitCount,
+        nbaPlayerCacheMissCount: nbaStatsDebug.nbaPlayerCacheMissCount,
+        nbaStatsCacheHitCount: nbaStatsDebug.nbaStatsCacheHitCount,
+        nbaStatsCacheMissCount: nbaStatsDebug.nbaStatsCacheMissCount,
         nbaStatsSource: "balldontlie",
       });
     }
