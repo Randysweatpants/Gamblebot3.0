@@ -425,6 +425,13 @@ function getCurrentNbaSeason() {
   return `${startYear}-${endYear}`;
 }
 
+function getCurrentNbaSeasonYear() {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth() + 1;
+  return month >= 7 ? year : year - 1;
+}
+
 function parseNbaMinutes(min) {
   if (min === null || min === undefined) return null;
   if (typeof min === "number") return Number.isFinite(min) ? min : null;
@@ -451,17 +458,14 @@ function nullReboundStats() {
   };
 }
 
-let _nbaPlayersCache = null;
-let _nbaPlayersCacheTime = 0;
-const NBA_PLAYERS_TTL_MS = 6 * 60 * 60 * 1000;
-const NBA_STATS_TIMEOUT_MS = 5000;
+const BALLDONTLIE_BASE = "https://api.balldontlie.io/v1";
+const NBA_STATS_TIMEOUT_MS = 8000;
+const BDL_STATS_TTL_MS = 60 * 60 * 1000; // 1 hour per-player stats cache
 
-const NBA_STATS_HEADERS = {
-  Accept: "application/json, text/plain, */*",
-  Origin: "https://www.nba.com",
-  Referer: "https://www.nba.com/",
-  "User-Agent": "Mozilla/5.0",
-};
+// Persists for server lifetime (player IDs don't change)
+const _bdlPlayerIdCache = new Map();
+// Per-player stats cache with TTL
+const _bdlStatsCache = new Map(); // normalizedName -> { stats, ts }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = NBA_STATS_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -492,114 +496,125 @@ function hasUsableReboundStats(stats) {
   return fields.some((value) => value != null);
 }
 
-async function getNbaPlayersMap(statsDebug) {
-  const now = Date.now();
-  if (_nbaPlayersCache && now - _nbaPlayersCacheTime < NBA_PLAYERS_TTL_MS) {
-    return _nbaPlayersCache;
+/**
+ * Look up a balldontlie player ID by display name.
+ * Results are cached for the server lifetime (player IDs are stable).
+ */
+async function getBdlPlayerId(playerName, apiKey, statsDebug) {
+  const normalizedName = String(playerName || "").trim().toLowerCase();
+  if (!normalizedName) return null;
+
+  if (_bdlPlayerIdCache.has(normalizedName)) {
+    return _bdlPlayerIdCache.get(normalizedName);
   }
 
-  const season = getCurrentNbaSeason();
-  const playersUrl = new URL("https://stats.nba.com/stats/commonallplayers");
-  playersUrl.searchParams.set("LeagueID", "00");
-  playersUrl.searchParams.set("Season", season);
-  playersUrl.searchParams.set("IsOnlyCurrentSeason", "1");
-
   try {
+    const searchUrl = new URL(`${BALLDONTLIE_BASE}/players`);
+    searchUrl.searchParams.set("search", playerName.trim());
+    searchUrl.searchParams.set("per_page", "5");
+
     const resp = await fetchWithTimeout(
-      playersUrl.toString(),
-      { headers: NBA_STATS_HEADERS },
+      searchUrl.toString(),
+      { headers: { Authorization: apiKey } },
       NBA_STATS_TIMEOUT_MS
     );
     if (!resp.ok) {
       incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
-      return new Map();
+      return null;
     }
 
     const data = await resp.json();
-    const resultSets = Array.isArray(data.resultSets) ? data.resultSets : [];
-    const firstSet = resultSets[0];
-    const headers = Array.isArray(firstSet?.headers) ? firstSet.headers : [];
-    const rows = Array.isArray(firstSet?.rowSet) ? firstSet.rowSet : [];
-    if (headers.length === 0 || rows.length === 0) {
-      incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
-      return new Map();
-    }
+    const players = Array.isArray(data.data) ? data.data : [];
+    if (players.length === 0) return null;
 
-    const nameIndex = headers.indexOf("DISPLAY_FIRST_LAST");
-    const idIndex = headers.indexOf("PERSON_ID");
-    if (nameIndex < 0 || idIndex < 0) {
-      incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
-      return new Map();
-    }
+    // Prefer exact full-name match, fall back to first result
+    const fullName = playerName.trim().toLowerCase();
+    const exactMatch = players.find(
+      (p) => `${p.first_name} ${p.last_name}`.toLowerCase() === fullName
+    );
+    const player = exactMatch ?? players[0];
+    if (!player.id) return null;
 
-    const map = new Map();
-    for (const row of rows) {
-      const name = String(row[nameIndex] ?? "").trim().toLowerCase();
-      const id = row[idIndex];
-      if (!name || !id) continue;
-      map.set(name, id);
-    }
-
-    _nbaPlayersCache = map;
-    _nbaPlayersCacheTime = now;
-    return map;
+    _bdlPlayerIdCache.set(normalizedName, player.id);
+    return player.id;
   } catch (err) {
     if (err && err.code === "TIMEOUT") {
       incrementNbaStatsCounter(statsDebug, "nbaStatsTimeoutCount");
-      return new Map();
+    } else {
+      incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
     }
-    incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
-    return new Map();
+    return null;
   }
 }
 
+/**
+ * Fetch per-player rebound stats for the current NBA season using balldontlie.
+ * Results are cached for BDL_STATS_TTL_MS to avoid duplicate API calls
+ * across multiple line/book groups for the same player.
+ */
 async function getPlayerReboundStats(playerName, homeTeam, awayTeam, statsDebug) {
   incrementNbaStatsCounter(statsDebug, "nbaPlayersProcessedCount");
+
+  const apiKey = process.env.BALLDONTLIE_API_KEY;
+  if (!apiKey) {
+    incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
+    return nullReboundStats();
+  }
+
+  const normalizedName = String(playerName || "").trim().toLowerCase();
+
+  // Return cached stats if still fresh
+  const cached = _bdlStatsCache.get(normalizedName);
+  if (cached && Date.now() - cached.ts < BDL_STATS_TTL_MS) {
+    // Count as success since we already have usable stats
+    if (hasUsableReboundStats(cached.stats)) {
+      incrementNbaStatsCounter(statsDebug, "nbaStatsSuccessCount");
+    }
+    return { ...cached.stats, homeTeam, awayTeam };
+  }
+
   try {
-    const playersMap = await getNbaPlayersMap(statsDebug);
-    const normalizedName = String(playerName || "").trim().toLowerCase();
-    if (!normalizedName) return nullReboundStats();
+    const playerId = await getBdlPlayerId(playerName, apiKey, statsDebug);
+    if (!playerId) {
+      incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
+      return nullReboundStats();
+    }
 
-    const playerId = playersMap.get(normalizedName);
-    if (!playerId) return nullReboundStats();
+    const seasonYear = getCurrentNbaSeasonYear();
+    const statsUrl = new URL(`${BALLDONTLIE_BASE}/stats`);
+    statsUrl.searchParams.set("player_ids[]", String(playerId));
+    statsUrl.searchParams.set("seasons[]", String(seasonYear));
+    statsUrl.searchParams.set("per_page", "100");
 
-    const season = getCurrentNbaSeason();
-    const gameLogUrl = new URL("https://stats.nba.com/stats/playergamelog");
-    gameLogUrl.searchParams.set("PlayerID", String(playerId));
-    gameLogUrl.searchParams.set("Season", season);
-    gameLogUrl.searchParams.set("SeasonType", "Regular Season");
-
-    const gameLogResp = await fetchWithTimeout(
-      gameLogUrl.toString(),
-      { headers: NBA_STATS_HEADERS },
+    const statsResp = await fetchWithTimeout(
+      statsUrl.toString(),
+      { headers: { Authorization: apiKey } },
       NBA_STATS_TIMEOUT_MS
     );
-    if (!gameLogResp.ok) {
+    if (!statsResp.ok) {
       incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
       return nullReboundStats();
     }
 
-    const gameLogData = await gameLogResp.json();
-    const resultSets = Array.isArray(gameLogData.resultSets) ? gameLogData.resultSets : [];
-    const firstSet = resultSets[0];
-    const headers = Array.isArray(firstSet?.headers) ? firstSet.headers : [];
-    const rows = Array.isArray(firstSet?.rowSet) ? firstSet.rowSet : [];
-    if (headers.length === 0 || rows.length === 0) {
-      incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
-      return nullReboundStats();
-    }
+    const statsData = await statsResp.json();
+    const gameEntries = Array.isArray(statsData.data) ? statsData.data : [];
 
-    const rebIndex = headers.indexOf("REB");
-    const minIndex = headers.indexOf("MIN");
-    if (rebIndex < 0) {
-      incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
-      return nullReboundStats();
-    }
+    // Sort newest-first (balldontlie does not guarantee date order)
+    gameEntries.sort((a, b) => {
+      const da = (a.game && a.game.date) ? a.game.date : "";
+      const db = (b.game && b.game.date) ? b.game.date : "";
+      return db.localeCompare(da);
+    });
 
-    const statRows = rows
-      .map((row) => ({
-        reb: Number(row[rebIndex]),
-        min: minIndex >= 0 ? parseNbaMinutes(row[minIndex]) : null,
+    // Exclude DNP rows (min null, "0", or "0:00")
+    const statRows = gameEntries
+      .filter((g) => {
+        const minVal = parseNbaMinutes(String(g.min ?? "0"));
+        return minVal !== null && minVal > 0 && g.reb !== null && g.reb !== undefined;
+      })
+      .map((g) => ({
+        reb: Number(g.reb),
+        min: parseNbaMinutes(String(g.min ?? "0")),
       }))
       .filter((row) => Number.isFinite(row.reb));
 
@@ -610,7 +625,8 @@ async function getPlayerReboundStats(playerName, homeTeam, awayTeam, statsDebug)
 
     const recent10 = statRows.slice(0, Math.min(10, statRows.length));
     const recent5 = statRows.slice(0, Math.min(5, statRows.length));
-    const avg = (arr, field) => arr.reduce((sum, item) => sum + Number(item[field] ?? 0), 0) / arr.length;
+    const avg = (arr, field) =>
+      arr.reduce((sum, item) => sum + Number(item[field] ?? 0), 0) / arr.length;
 
     const last10Avg = recent10.length >= 3 ? avg(recent10, "reb") : null;
     const last5Avg = recent5.length >= 3 ? avg(recent5, "reb") : null;
@@ -618,19 +634,15 @@ async function getPlayerReboundStats(playerName, homeTeam, awayTeam, statsDebug)
 
     const minuteSamples = recent10
       .map((row) => row.min)
-      .filter((value) => value != null && Number.isFinite(value));
+      .filter((v) => v != null && Number.isFinite(v));
     const minutesAvg = minuteSamples.length
-      ? minuteSamples.reduce((sum, value) => sum + value, 0) / minuteSamples.length
+      ? minuteSamples.reduce((sum, v) => sum + v, 0) / minuteSamples.length
       : null;
 
-    const stats = {
-      last10Avg,
-      last5Avg,
-      seasonAvg,
-      minutesAvg,
-      homeTeam,
-      awayTeam,
-    };
+    const coreStats = { last10Avg, last5Avg, seasonAvg, minutesAvg };
+    _bdlStatsCache.set(normalizedName, { stats: coreStats, ts: Date.now() });
+
+    const stats = { ...coreStats, homeTeam, awayTeam };
     if (hasUsableReboundStats(stats)) {
       incrementNbaStatsCounter(statsDebug, "nbaStatsSuccessCount");
     } else {
@@ -643,7 +655,7 @@ async function getPlayerReboundStats(playerName, homeTeam, awayTeam, statsDebug)
     } else {
       incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
     }
-    console.error(`[Rebounds stats] NBA API error for "${playerName}":`, err.message);
+    console.error(`[Rebounds stats] balldontlie error for "${playerName}":`, err.message);
     return nullReboundStats();
   }
 }
@@ -1229,6 +1241,7 @@ app.get("/api/top-ev-picks", async (req, res) => {
         nbaStatsFailureCount: nbaStatsDebug.nbaStatsFailureCount,
         nbaStatsSuccessCount: nbaStatsDebug.nbaStatsSuccessCount,
         nbaPlayersProcessedCount: nbaStatsDebug.nbaPlayersProcessedCount,
+        nbaStatsSource: "balldontlie",
       });
     }
 
