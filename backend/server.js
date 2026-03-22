@@ -535,92 +535,91 @@ async function getBdlPlayerId(playerName, apiKey, statsDebug) {
   }
 
   try {
-    const searchUrl = new URL(`${BALLDONTLIE_BASE}/players`);
-    searchUrl.searchParams.set("search", playerName.trim());
-    searchUrl.searchParams.set("per_page", "10");
-
-    const resp = await fetchWithTimeout(
-      searchUrl.toString(),
-      { headers: { Authorization: apiKey } },
-      NBA_STATS_TIMEOUT_MS
-    );
-    if (!resp.ok) {
+    // Split the full name into first and last name
+    // Balldontlie search only works on first_name or last_name independently
+    const nameParts = normalizedOddsName.split(/\s+/).filter(Boolean);
+    if (nameParts.length < 1) {
       incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
       return null;
     }
 
-    const data = await resp.json();
-    const players = Array.isArray(data.data) ? data.data : [];
+    const firstName = nameParts[0];
+    const lastName = nameParts[nameParts.length - 1];
+
+    let players = [];
+
+    // Strategy 1: Search by first name
+    try {
+      const firstNameUrl = new URL(`${BALLDONTLIE_BASE}/players`);
+      firstNameUrl.searchParams.set("search", firstName);
+      firstNameUrl.searchParams.set("per_page", "20");
+
+      let resp = await fetchWithTimeout(
+        firstNameUrl.toString(),
+        { headers: { Authorization: apiKey } },
+        NBA_STATS_TIMEOUT_MS
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        players = Array.isArray(data.data) ? data.data : [];
+      }
+    } catch (err) {
+      // First name search failed, try last name
+    }
+
+    // Look for exact full-name match in first-name search results
+    if (players.length > 0) {
+      let matchedPlayer = players.find((p) => {
+        const bdlFullName = normalizePlayerName(
+          `${p.first_name} ${p.last_name}`
+        );
+        return bdlFullName === normalizedOddsName;
+      });
+      if (matchedPlayer && matchedPlayer.id) {
+        _bdlPlayerIdCache.set(normalizedOddsName, matchedPlayer.id);
+        incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
+        return matchedPlayer.id;
+      }
+    }
+
+    // Strategy 2: Search by last name if first name search didn't match
+    try {
+      const lastNameUrl = new URL(`${BALLDONTLIE_BASE}/players`);
+      lastNameUrl.searchParams.set("search", lastName);
+      lastNameUrl.searchParams.set("per_page", "20");
+
+      const resp = await fetchWithTimeout(
+        lastNameUrl.toString(),
+        { headers: { Authorization: apiKey } },
+        NBA_STATS_TIMEOUT_MS
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        players = Array.isArray(data.data) ? data.data : [];
+      }
+    } catch (err) {
+      // Last name search also failed
+    }
+
     if (players.length === 0) {
       incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
       return null;
     }
 
-    // Strategy 1: Exact normalized full-name match
-    const bdlNormalizedNames = players.map(
-      (p) => normalizePlayerName(`${p.first_name} ${p.last_name}`)
-    );
-    let matchIndex = bdlNormalizedNames.indexOf(normalizedOddsName);
-    if (matchIndex >= 0) {
-      const playerId = players[matchIndex].id;
-      if (playerId) {
-        _bdlPlayerIdCache.set(normalizedOddsName, playerId);
-        incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
-        return playerId;
-      }
+    // Look for exact full-name match in last-name search results  
+    let matchedPlayer = players.find((p) => {
+      const bdlFullName = normalizePlayerName(
+        `${p.first_name} ${p.last_name}`
+      );
+      return bdlFullName === normalizedOddsName;
+    });
+    if (matchedPlayer && matchedPlayer.id) {
+      _bdlPlayerIdCache.set(normalizedOddsName, matchedPlayer.id);
+      incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
+      return matchedPlayer.id;
     }
 
-    // Strategy 2: First Initial + Last Name
-    const oddsInitialLast = getInitialLastName(normalizedOddsName);
-    if (oddsInitialLast) {
-      matchIndex = players.findIndex((p) => {
-        const bdlInitialLast = getInitialLastName(
-          `${p.first_name} ${p.last_name}`
-        );
-        return bdlInitialLast === oddsInitialLast;
-      });
-      if (matchIndex >= 0) {
-        const playerId = players[matchIndex].id;
-        if (playerId) {
-          _bdlPlayerIdCache.set(normalizedOddsName, playerId);
-          incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
-          return playerId;
-        }
-      }
-    }
-
-    // Strategy 3: First name + last name without punctuation (case-insensitive)
-    const oddsParts = normalizedOddsName.split(/\s+/);
-    if (oddsParts.length >= 2) {
-      const oddsFirstLast = `${oddsParts[0]} ${oddsParts[oddsParts.length - 1]}`;
-      matchIndex = players.findIndex((p) => {
-        const bdlFirstLast = normalizePlayerName(
-          `${p.first_name} ${p.last_name}`
-        );
-        const bdlParts = bdlFirstLast.split(/\s+/);
-        if (bdlParts.length < 2) return false;
-        const bdlFirst = bdlParts[0];
-        const bdlLast = bdlParts[bdlParts.length - 1];
-        return oddsFirstLast === `${bdlFirst} ${bdlLast}`;
-      });
-      if (matchIndex >= 0) {
-        const playerId = players[matchIndex].id;
-        if (playerId) {
-          _bdlPlayerIdCache.set(normalizedOddsName, playerId);
-          incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
-          return playerId;
-        }
-      }
-    }
-
-    // Fallback: first result if no strategies work; don't log as success
-    const firstPlayer = players[0];
-    if (firstPlayer && firstPlayer.id) {
-      _bdlPlayerIdCache.set(normalizedOddsName, firstPlayer.id);
-      incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
-      return firstPlayer.id;
-    }
-
+    // No exact match found from either search
     incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
     return null;
   } catch (err) {
