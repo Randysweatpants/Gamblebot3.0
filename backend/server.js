@@ -1,7 +1,31 @@
 import express from "express";
 import cors from "cors";
+import { access, appendFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const app = express();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const ACCEPTED_PICK_LOG_FIELDS = [
+  "date",
+  "gameKey",
+  "pickKey",
+  "player",
+  "side",
+  "line",
+  "book",
+  "odds",
+  "proj",
+  "fairProb",
+  "impliedProb",
+  "ev",
+  "confidence",
+];
+const LOG_DIR = path.join(__dirname, "logs");
+const ACCEPTED_PICKS_JSON_LOG_FILE = path.join(LOG_DIR, "accepted-picks.jsonl");
+const ACCEPTED_PICKS_CSV_LOG_FILE = path.join(LOG_DIR, "accepted-picks.csv");
 
 app.use(
   cors({
@@ -16,6 +40,111 @@ app.get("/", (req, res) => {
 
 app.get("/healthz", (req, res) => {
   res.send("ok");
+});
+
+function toCsvCell(value) {
+  if (value === null || value === undefined) return "";
+  const str = String(value);
+  if (str.includes(",") || str.includes("\"") || str.includes("\n")) {
+    return `"${str.replace(/\"/g, '""')}"`;
+  }
+  return str;
+}
+
+function normalizeAcceptedPickPayload(payload) {
+  return {
+    date: payload.date ? String(payload.date) : new Date().toISOString(),
+    gameKey: payload.gameKey ? String(payload.gameKey) : "",
+    pickKey: payload.pickKey ? String(payload.pickKey) : "",
+    player: payload.player ? String(payload.player) : "",
+    side: payload.side ? String(payload.side) : "",
+    line: payload.line ?? null,
+    book: payload.book ? String(payload.book) : "",
+    odds: payload.odds ?? null,
+    proj: payload.proj ?? null,
+    fairProb: payload.fairProb ?? null,
+    impliedProb: payload.impliedProb ?? null,
+    ev: payload.ev ?? null,
+    confidence: payload.confidence ?? null,
+  };
+}
+
+function validateAcceptedPickPayload(pick) {
+  const requiredFields = [
+    "gameKey",
+    "pickKey",
+    "player",
+    "side",
+    "line",
+    "book",
+    "odds",
+    "proj",
+    "fairProb",
+    "impliedProb",
+    "ev",
+    "confidence",
+  ];
+  const missing = requiredFields.filter((field) => pick[field] === "" || pick[field] === null || pick[field] === undefined);
+  return missing;
+}
+
+app.post("/api/accepted-picks/log", async (req, res) => {
+  const format = String(req.query.format || "json").toLowerCase();
+  if (format !== "json" && format !== "csv") {
+    return res.status(400).json({
+      error: "invalid format",
+      details: "use ?format=json or ?format=csv",
+    });
+  }
+
+  const logEntry = normalizeAcceptedPickPayload(req.body || {});
+  const missingFields = validateAcceptedPickPayload(logEntry);
+  if (missingFields.length > 0) {
+    return res.status(400).json({
+      error: "missing required fields",
+      missingFields,
+    });
+  }
+
+  try {
+    await mkdir(LOG_DIR, { recursive: true });
+
+    if (format === "csv") {
+      let csvExists = true;
+      try {
+        await access(ACCEPTED_PICKS_CSV_LOG_FILE);
+      } catch {
+        csvExists = false;
+      }
+
+      if (!csvExists) {
+        await appendFile(ACCEPTED_PICKS_CSV_LOG_FILE, `${ACCEPTED_PICK_LOG_FIELDS.join(",")}\n`, "utf8");
+      }
+
+      const row = ACCEPTED_PICK_LOG_FIELDS.map((field) => toCsvCell(logEntry[field])).join(",");
+      await appendFile(ACCEPTED_PICKS_CSV_LOG_FILE, `${row}\n`, "utf8");
+
+      return res.json({
+        ok: true,
+        format,
+        file: "logs/accepted-picks.csv",
+        loggedAt: new Date().toISOString(),
+      });
+    }
+
+    await appendFile(ACCEPTED_PICKS_JSON_LOG_FILE, `${JSON.stringify(logEntry)}\n`, "utf8");
+    return res.json({
+      ok: true,
+      format,
+      file: "logs/accepted-picks.jsonl",
+      loggedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: "failed to write accepted pick log",
+      details: String(error),
+    });
+  }
 });
 
 function americanToImpliedProbability(odds) {
@@ -626,10 +755,20 @@ app.get("/api/top-ev-picks", async (req, res) => {
       .sort((a, b) => b.impliedProb - a.impliedProb)
       .slice(0, 10);
 
+    const topShotsWithTracking = cleanedTopShotsResult.topShots.map((pick) => {
+      const homeTeam = pick._homeTeam || "";
+      const awayTeam = pick._awayTeam || "";
+      return {
+        ...pick,
+        gameKey: `${homeTeam} vs ${awayTeam}`,
+        pickKey: `${pick.player}|${pick.market}|${pick.side}|${pick.line}|${pick.book}`,
+      };
+    });
+
     return res.json({
       topPoints,
       topAssists,
-      topShots: cleanedTopShotsResult.topShots,
+      topShots: topShotsWithTracking,
       topShotsDebug: cleanedTopShotsResult.debug,
       allPicksCount: picks.length,
     });
