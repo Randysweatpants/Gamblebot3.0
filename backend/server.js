@@ -496,22 +496,48 @@ function hasUsableReboundStats(stats) {
   return fields.some((value) => value != null);
 }
 
+/** Normalize a player name for matching. */
+function normalizePlayerName(name) {
+  if (!name) return "";
+  return String(name)
+    .toLowerCase()
+    .trim()
+    // Remove common suffixes
+    .replace(/\b(jr\.?|sr\.?|ii|iii|iv|v)\.?\b/gi, "")
+    // Remove punctuation except spaces
+    .replace(/[^a-z0-9\s]/g, "")
+    // Collapse multiple spaces
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Extract first initial and last name from a full name. */
+function getInitialLastName(fullName) {
+  const parts = normalizePlayerName(fullName).split(/\s+/);
+  if (parts.length < 2) return null;
+  const firstInitial = parts[0].charAt(0);
+  const lastName = parts[parts.length - 1];
+  return `${firstInitial}${lastName}`;
+}
+
 /**
  * Look up a balldontlie player ID by display name.
+ * Uses multiple matching strategies to find the best match.
  * Results are cached for the server lifetime (player IDs are stable).
  */
 async function getBdlPlayerId(playerName, apiKey, statsDebug) {
-  const normalizedName = String(playerName || "").trim().toLowerCase();
-  if (!normalizedName) return null;
+  const normalizedOddsName = normalizePlayerName(playerName);
+  if (!normalizedOddsName) return null;
 
-  if (_bdlPlayerIdCache.has(normalizedName)) {
-    return _bdlPlayerIdCache.get(normalizedName);
+  if (_bdlPlayerIdCache.has(normalizedOddsName)) {
+    incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
+    return _bdlPlayerIdCache.get(normalizedOddsName);
   }
 
   try {
     const searchUrl = new URL(`${BALLDONTLIE_BASE}/players`);
     searchUrl.searchParams.set("search", playerName.trim());
-    searchUrl.searchParams.set("per_page", "5");
+    searchUrl.searchParams.set("per_page", "10");
 
     const resp = await fetchWithTimeout(
       searchUrl.toString(),
@@ -519,29 +545,89 @@ async function getBdlPlayerId(playerName, apiKey, statsDebug) {
       NBA_STATS_TIMEOUT_MS
     );
     if (!resp.ok) {
-      incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
+      incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
       return null;
     }
 
     const data = await resp.json();
     const players = Array.isArray(data.data) ? data.data : [];
-    if (players.length === 0) return null;
+    if (players.length === 0) {
+      incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
+      return null;
+    }
 
-    // Prefer exact full-name match, fall back to first result
-    const fullName = playerName.trim().toLowerCase();
-    const exactMatch = players.find(
-      (p) => `${p.first_name} ${p.last_name}`.toLowerCase() === fullName
+    // Strategy 1: Exact normalized full-name match
+    const bdlNormalizedNames = players.map(
+      (p) => normalizePlayerName(`${p.first_name} ${p.last_name}`)
     );
-    const player = exactMatch ?? players[0];
-    if (!player.id) return null;
+    let matchIndex = bdlNormalizedNames.indexOf(normalizedOddsName);
+    if (matchIndex >= 0) {
+      const playerId = players[matchIndex].id;
+      if (playerId) {
+        _bdlPlayerIdCache.set(normalizedOddsName, playerId);
+        incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
+        return playerId;
+      }
+    }
 
-    _bdlPlayerIdCache.set(normalizedName, player.id);
-    return player.id;
+    // Strategy 2: First Initial + Last Name
+    const oddsInitialLast = getInitialLastName(normalizedOddsName);
+    if (oddsInitialLast) {
+      matchIndex = players.findIndex((p) => {
+        const bdlInitialLast = getInitialLastName(
+          `${p.first_name} ${p.last_name}`
+        );
+        return bdlInitialLast === oddsInitialLast;
+      });
+      if (matchIndex >= 0) {
+        const playerId = players[matchIndex].id;
+        if (playerId) {
+          _bdlPlayerIdCache.set(normalizedOddsName, playerId);
+          incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
+          return playerId;
+        }
+      }
+    }
+
+    // Strategy 3: First name + last name without punctuation (case-insensitive)
+    const oddsParts = normalizedOddsName.split(/\s+/);
+    if (oddsParts.length >= 2) {
+      const oddsFirstLast = `${oddsParts[0]} ${oddsParts[oddsParts.length - 1]}`;
+      matchIndex = players.findIndex((p) => {
+        const bdlFirstLast = normalizePlayerName(
+          `${p.first_name} ${p.last_name}`
+        );
+        const bdlParts = bdlFirstLast.split(/\s+/);
+        if (bdlParts.length < 2) return false;
+        const bdlFirst = bdlParts[0];
+        const bdlLast = bdlParts[bdlParts.length - 1];
+        return oddsFirstLast === `${bdlFirst} ${bdlLast}`;
+      });
+      if (matchIndex >= 0) {
+        const playerId = players[matchIndex].id;
+        if (playerId) {
+          _bdlPlayerIdCache.set(normalizedOddsName, playerId);
+          incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchSuccessCount");
+          return playerId;
+        }
+      }
+    }
+
+    // Fallback: first result if no strategies work; don't log as success
+    const firstPlayer = players[0];
+    if (firstPlayer && firstPlayer.id) {
+      _bdlPlayerIdCache.set(normalizedOddsName, firstPlayer.id);
+      incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
+      return firstPlayer.id;
+    }
+
+    incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
+    return null;
   } catch (err) {
     if (err && err.code === "TIMEOUT") {
       incrementNbaStatsCounter(statsDebug, "nbaStatsTimeoutCount");
     } else {
-      incrementNbaStatsCounter(statsDebug, "nbaStatsFailureCount");
+      incrementNbaStatsCounter(statsDebug, "nbaPlayerMatchFailureCount");
     }
     return null;
   }
@@ -946,6 +1032,19 @@ app.get("/api/top-ev-picks", async (req, res) => {
   const requestedSport = String(req.query.sport || "NHL").toUpperCase();
   const resolvedSportKey = sportMap[requestedSport] || sportMap.NHL;
   const book = req.query.book ? String(req.query.book) : undefined;
+  const lowCostMode = ["1", "true", "yes", "on"].includes(
+    String(req.query.lowCost || "").toLowerCase()
+  );
+  const parsedMaxEvents = Number(req.query.maxEvents);
+  const maxEvents = Number.isFinite(parsedMaxEvents)
+    ? Math.max(1, Math.min(20, Math.floor(parsedMaxEvents)))
+    : lowCostMode ? 2 : null;
+
+  function maybeLimitEventIds(eventIds) {
+    if (!Array.isArray(eventIds)) return [];
+    if (!maxEvents) return eventIds;
+    return eventIds.slice(0, maxEvents);
+  }
 
   try {
     const defaultShotsDebug = {
@@ -972,6 +1071,8 @@ app.get("/api/top-ev-picks", async (req, res) => {
         nbaStatsFailureCount: 0,
         nbaStatsSuccessCount: 0,
         nbaPlayersProcessedCount: 0,
+        nbaPlayerMatchSuccessCount: 0,
+        nbaPlayerMatchFailureCount: 0,
       };
       const nbaReboundMarketCandidates = ["player_rebounds", "player_rebounds_alternate"];
       const eventListUrl = new URL(`https://api.the-odds-api.com/v4/sports/${encodeURIComponent(sportMap.NBA)}/odds`);
@@ -994,9 +1095,10 @@ app.get("/api/top-ev-picks", async (req, res) => {
       }
 
       const listData = await listResponse.json();
-      const eventIds = Array.isArray(listData)
+      const allEventIds = Array.isArray(listData)
         ? listData.map((event) => event.id ?? event.event_id).filter(Boolean)
         : [];
+      const eventIds = maybeLimitEventIds(allEventIds);
       const eventListCount = eventIds.length;
       const firstEventId = eventIds[0] ?? null;
       let rawBookmakerCount = 0;
@@ -1241,6 +1343,8 @@ app.get("/api/top-ev-picks", async (req, res) => {
         nbaStatsFailureCount: nbaStatsDebug.nbaStatsFailureCount,
         nbaStatsSuccessCount: nbaStatsDebug.nbaStatsSuccessCount,
         nbaPlayersProcessedCount: nbaStatsDebug.nbaPlayersProcessedCount,
+        nbaPlayerMatchSuccessCount: nbaStatsDebug.nbaPlayerMatchSuccessCount,
+        nbaPlayerMatchFailureCount: nbaStatsDebug.nbaPlayerMatchFailureCount,
         nbaStatsSource: "balldontlie",
       });
     }
@@ -1266,9 +1370,10 @@ app.get("/api/top-ev-picks", async (req, res) => {
     }
 
     const listData = await listResponse.json();
-    const eventIds = Array.isArray(listData)
+    const allEventIds = Array.isArray(listData)
       ? listData.map((event) => event.id ?? event.event_id).filter(Boolean)
       : [];
+    const eventIds = maybeLimitEventIds(allEventIds);
     const eventListCount = eventIds.length;
     let rawBookmakerCount = 0;
 
